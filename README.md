@@ -89,6 +89,10 @@ console.log(result.matched); // true
 
 Solana / Anchor 1.1.2 + Arcium 0.12.0 + Arcis + NVIDIA DGX Spark (aarch64)
 
+## Live demo
+
+**[Try it now](https://anoadder-ship-it.github.io/darkpool-demo-)** — Connect Phantom wallet and run real encrypted computations on Solana devnet.
+
 ## License
 
 MIT
