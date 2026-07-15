@@ -133,9 +133,65 @@ Of compileer eerst met tsc en draai als plain node
 - Chip:         6xLjbo4yfc5j2CMu69DkycTJrGZttHzeqieXf2NPvu8o
 - Cluster offset: 456
 
+**Multisig-beheer (Squads V2, 2-of-3):**
+- Multisig PDA: J6dar1yhhx8NPVYbRRF2EJXRnS7eD7J4NT6X2ohGfs1b
+- Vault PDA (index 0), upgrade authority van alle vier programma's: EmYvQBX7WPmLDnYEhSGRPv9wWf9whAEgLnZviSc4xWqY
+- Leden: HnQPCEiCTT8fzvPpRpz5J3fxsL3vELRVuaqfVFM154Ly, DDzVGAfzrFCu5QEFstv2KNHsxRTgQVAC6nSqp1PWh46d, 4sRKi6mErV1fJCXNyY1RevU7Gv29gFJw82frweK86bmx
+
 ---
 
-## Deel 7: Links
+## Deel 7: Multisig Upgrade Procedure
+
+Alle vier darkpool-programma's staan onder een Squads V2 2-of-3 multisig.
+Geen enkele upgrade kan door een persoon alleen worden uitgevoerd — er zijn
+altijd 2 van de 3 leden nodig. Volledige, geverifieerde procedure hieronder
+(bewezen op alle vier programma's, 15 juli 2026).
+
+**Tool:** `~/upgrade-tool/upgrade-tool.html`, draaiend via
+`python3 -m http.server 8898` op `http://localhost:8898/upgrade-tool.html`.
+
+```mermaid
+flowchart TD
+    A[Nieuwe code: target/deploy/*.so] --> B[solana program write-buffer]
+    B --> C[Nieuw buffer, authority = lokale keypair]
+    C --> D[solana program set-buffer-authority naar Vault PDA]
+    D --> E[Buffer-adres invullen in upgrade-tool.html]
+    E --> F[Browser: 1. Voorstel aanmaken]
+    F --> G[Lid 1: 2. Goedkeuren]
+    G --> H[Wissel Phantom naar ander lid]
+    H --> I[Lid 2: 2. Goedkeuren -> Approved]
+    I --> J[3. Uitvoeren]
+    J --> K[Programma geupgraded, buffer automatisch gesloten]
+```
+
+**Stappen:**
+
+1. `solana program write-buffer target/deploy/<naam>.so --url https://api.devnet.solana.com`
+   → geeft nieuw buffer-adres
+2. `solana program set-buffer-authority <BUFFER> --new-buffer-authority EmYvQBX7WPmLDnYEhSGRPv9wWf9whAEgLnZviSc4xWqY --url https://api.devnet.solana.com`
+3. Buffer-adres invullen in de dropdown van `upgrade-tool.html` (bewerk de
+   `<option value="PROGRAM_ID|BUFFER_ADRES">`-regel; maak eerst een backup)
+4. Browser: Connect Phantom (lid 1) → **1. Voorstel aanmaken**
+5. **2. Goedkeuren (huidig account)** — 1e goedkeuring
+6. Wissel Phantom naar een ander lid → Connect Phantom opnieuw →
+   **2. Goedkeuren (huidig account)** — 2e goedkeuring
+7. **3. Uitvoeren**
+
+**Bekende foutcodes:**
+
+| Fout | Betekenis | Oplossing |
+|---|---|---|
+| `Custom:6008` bij Uitvoeren | `InvalidProposalStatus` — nog niet 2/2 goedkeuringen | Tweede, ander lid laten goedkeuren |
+| `Custom:6008` bij Goedkeuren | Verkeerde knop ingedrukt (was eigenlijk Uitvoeren) | Controleer welke instructie de browserconsole logt |
+| `IncorrectProgramId` | Buffer-adres bestaat niet (meer) op devnet | Nieuw buffer aanmaken (stap 1-2), verifiëren met `getAccountInfo` |
+
+Diagnostische scripts (voorstelstatus checken, transactielogs uitlezen,
+buffer verifiëren) staan in `UPGRADE-PROCEDURE.md` in de root van
+`solana_darkpool` op de DGX Spark.
+
+---
+
+## Deel 8: Links
 
 - Demo: https://anoadder-ship-it.github.io/darkpool-demo-
 - npm: https://www.npmjs.com/package/arcium-darkpool-sdk
