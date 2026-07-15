@@ -1,5 +1,8 @@
 # Solana Confidential Dark Pool
 
+> Onderdeel van de **Darkpool Suite** — zie [darkpool-template](https://github.com/anoadder-ship-it/darkpool-template) voor het volledige overzicht, alle vier darkpools, en de multisig-upgrade-procedure.
+
+
 Privacy-preserving order matching on Solana using [Arcium](https://arcium.com) MPC. Bid prices, order sizes, and trader identities stay encrypted end-to-end.
 
 **Program:** [h6zsnHt28NpeS94Ek3fQP1YEiu1WrpGT2pKynWZzKVX](https://explorer.solana.com/address/h6zsnHt28NpeS94Ek3fQP1YEiu1WrpGT2pKynWZzKVX?cluster=devnet)  
