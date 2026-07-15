@@ -1,0 +1,41 @@
+# Solana / Anchor
+target/
+test-ledger/
+.anchor/
+
+# Keypairs en secrets — NOOIT committen
+*.json
+!package.json
+!package-lock.json
+!Anchor.toml
+!Cargo.toml
+!tsconfig.json
+id.json
+*keypair*.json
+*.pem
+*.key
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build output
+dist/
+build/
+*.so.bak
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# Logs
+*.log
+
