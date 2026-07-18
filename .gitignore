@@ -1,0 +1,58 @@
+# Keypairs en geheimen (NIET: IDL's of losse configuratie-JSON)
+**/*-keypair.json
+**/id.json
+**/test-wallets/*.json
+**/*.key
+**/*.pem
+
+# Build-artefacten
+**/target/
+**/.anchor/
+**/build/
+**/dist/
+
+# Node
+**/node_modules/
+
+# IDE
+**/.idea/
+**/.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# Python
+venv/
+.venv/
+__pycache__/
+
+# Cargo
+Cargo.lock
+
+# Coverage / test-resultaten (niet: tests-manual/, dat is broncode)
+coverage/
+.nyc_output/
+test-results/
+test-reports/
+
+# Gegenereerd
+**/generated/
+**/generated/**
+
+# Tijdelijk
+tmp/
+temp/
+*.tmp
+
+# Grote gebundelde binaries (los te distribueren, niet in git)
+**/*.so

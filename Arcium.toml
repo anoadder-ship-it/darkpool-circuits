@@ -1,0 +1,12 @@
+[localnet]
+provider_url = "http://127.0.0.1:8899"
+wallet = "~/.config/solana/id.json"
+nodes = 2
+localnet_timeout_secs = 300
+
+[provider]
+cluster = "devnet"
+wallet = "~/.config/solana/id.json"
+
+[clusters.devnet]
+offset = 456

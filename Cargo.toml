@@ -1,0 +1,20 @@
+[workspace]
+members = [
+    "programs/solana_darkpool",
+    "programs/medical_darkpool",
+    "programs/supply_chain_darkpool",
+    "programs/chip_darkpool",
+    "encrypted-ixs",
+]
+resolver = "2"
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+overflow-checks = true
+
+[profile.release.build-override]
+opt-level = 3
+codegen-units = 1
