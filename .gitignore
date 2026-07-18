@@ -56,3 +56,5 @@ temp/
 
 # Grote gebundelde binaries (los te distribueren, niet in git)
 **/*.so
+*.bak2
+*.bak3

@@ -41,6 +41,13 @@ pub struct TriggerMoeras<'info> {
     pub signer: Signer<'info>,
 }
 
+// ReactivatePool accounts context
+#[derive(Accounts)]
+pub struct ReactivatePool<'info> {
+    #[account(mut)]
+    pub pool: Account<'info, PoolState>,
+    pub signer: Signer<'info>,
+}
 // InitializePool accounts context
 #[derive(Accounts)]
 pub struct InitializePool<'info> {
@@ -102,6 +109,7 @@ pub mod solana_darkpool {
         pubkey: [u8; 32],
         nonce:  u128,
     ) -> Result<()> {
+        require!(ctx.accounts.moeras_pool.status == PoolStatus::Active, ErrorCode::MoerasModeActive);
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
         let args = ArgBuilder::new()
             .x25519_pubkey(pubkey)
@@ -139,6 +147,7 @@ pub mod solana_darkpool {
         pubkey: [u8; 32],
         nonce:  u128,
     ) -> Result<()> {
+        require!(ctx.accounts.moeras_pool.status == PoolStatus::Active, ErrorCode::MoerasModeActive);
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
         let args = ArgBuilder::new()
             .x25519_pubkey(pubkey)
@@ -174,6 +183,7 @@ pub mod solana_darkpool {
         pubkey: [u8; 32],
         nonce:  u128,
     ) -> Result<()> {
+        require!(ctx.accounts.moeras_pool.status == PoolStatus::Active, ErrorCode::MoerasModeActive);
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
         let args = ArgBuilder::new()
             .x25519_pubkey(pubkey)
@@ -202,6 +212,24 @@ pub mod solana_darkpool {
     }
 
 
+    // Pool-initialisatie: maakt het PoolState-account aan, initialisator wordt guardian
+    pub fn initialize_pool(ctx: Context<InitializePool>) -> Result<()> {
+        let pool = &mut ctx.accounts.pool;
+        pool.guardian = ctx.accounts.user.key();
+        pool.status = PoolStatus::Active;
+        pool.last_heartbeat_slot = Clock::get()?.slot;
+        msg!("Pool geinitialiseerd, guardian: {}", pool.guardian);
+        Ok(())
+    }
+    // Herstelfunctie: zet Moeras-modus terug naar Active, alleen door de guardian
+    pub fn reactivate_pool(ctx: Context<ReactivatePool>) -> Result<()> {
+        let pool = &mut ctx.accounts.pool;
+        require!(ctx.accounts.signer.key() == pool.guardian, ErrorCode::UnauthorizedGuardian);
+        pool.status = PoolStatus::Active;
+        pool.last_heartbeat_slot = Clock::get()?.slot;
+        msg!("Pool gereactiveerd, trading hervat.");
+        Ok(())
+    }
     // Heartbeat functie
     pub fn send_heartbeat(ctx: Context<SendHeartbeat>) -> Result<()> {
         let pool = &mut ctx.accounts.pool;
@@ -390,6 +418,7 @@ pub struct PlaceOrder<'info> {
     pub computation_account: UncheckedAccount<'info>,
     #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_PLACE_ORDER))]
     pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+    pub moeras_pool: Account<'info, PoolState>,
     #[account(mut, address = derive_cluster_pda!(mxe_account))]
     pub cluster_account: Box<Account<'info, Cluster>>,
     #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
@@ -458,6 +487,7 @@ pub struct MatchOrders<'info> {
     pub computation_account: UncheckedAccount<'info>,
     #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_MATCH_ORDERS))]
     pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+    pub moeras_pool: Account<'info, PoolState>,
     #[account(mut, address = derive_cluster_pda!(mxe_account))]
     pub cluster_account: Box<Account<'info, Cluster>>,
     #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
@@ -526,6 +556,7 @@ pub struct CancelOrder<'info> {
     pub computation_account: UncheckedAccount<'info>,
     #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_CANCEL_ORDER))]
     pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+    pub moeras_pool: Account<'info, PoolState>,
     #[account(mut, address = derive_cluster_pda!(mxe_account))]
     pub cluster_account: Box<Account<'info, Cluster>>,
     #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
@@ -652,6 +683,9 @@ pub enum ErrorCode {
     UnauthorizedGuardian,
     #[msg("The computation was aborted")]
     AbortedComputation,
+
+    #[msg("Moeras-modus is actief: trading is tijdelijk bevroren voor beveiligingsonderzoek")]
+    MoerasModeActive,
     #[msg("Escrow amount must be greater than zero")]
     InvalidEscrowAmount,
     #[msg("Escrow is not in the required status for this action")]
