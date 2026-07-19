@@ -2,6 +2,5 @@
 name = "encrypted-ixs"
 version = "0.1.0"
 edition = "2021"
-
 [dependencies]
-arcis = "0.11.1"
+arcis = "=0.11.1"

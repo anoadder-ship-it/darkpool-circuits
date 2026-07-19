@@ -4,7 +4,6 @@ members = [
     "programs/medical_darkpool",
     "programs/supply_chain_darkpool",
     "programs/chip_darkpool",
-    "encrypted-ixs",
 ]
 resolver = "2"
 
