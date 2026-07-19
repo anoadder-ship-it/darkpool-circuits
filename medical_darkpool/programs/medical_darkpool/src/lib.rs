@@ -179,9 +179,15 @@ pub struct RegisterDataset<'info> {
     #[account(init_if_needed, space = 9, payer = payer, seeds = [&SIGN_PDA_SEED], bump, address = derive_sign_pda!())]
     pub sign_pda_account: Account<'info, ArciumSignerAccount>,
     #[account(address = derive_mxe_pda!())] pub mxe_account: Box<Account<'info, MXEAccount>>,
-    #[account(mut, address = derive_mempool_pda!(mxe_account))] /// CHECK: arcium. pub mempool_account: UncheckedAccount<'info>,
-    #[account(mut, address = derive_execpool_pda!(mxe_account))] /// CHECK: arcium. pub executing_pool: UncheckedAccount<'info>,
-    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account))] /// CHECK: arcium. pub computation_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_mempool_pda!(mxe_account))]
+    /// CHECK: arcium.
+    pub mempool_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_execpool_pda!(mxe_account))]
+    /// CHECK: arcium.
+    pub executing_pool: UncheckedAccount<'info>,
+    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account))]
+    /// CHECK: arcium.
+    pub computation_account: UncheckedAccount<'info>,
     #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_REGISTER))] pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
     #[account(mut, address = derive_cluster_pda!(mxe_account))] pub cluster_account: Box<Account<'info, Cluster>>,
     #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)] pub pool_account: Account<'info, FeePool>,
@@ -196,9 +202,12 @@ pub struct RegisterDatasetCallback<'info> {
     pub arcium_program: Program<'info, Arcium>,
     #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_REGISTER))] pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
     #[account(address = derive_mxe_pda!())] pub mxe_account: Account<'info, MXEAccount>,
-    /// CHECK: arcium. pub computation_account: UncheckedAccount<'info>,
+    /// CHECK: arcium.
+    pub computation_account: UncheckedAccount<'info>,
     #[account(address = derive_cluster_pda!(mxe_account))] pub cluster_account: Account<'info, Cluster>,
-    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)] /// CHECK: sysvar. pub instructions_sysvar: UncheckedAccount<'info>,
+    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
+    /// CHECK: sysvar.
+    pub instructions_sysvar: UncheckedAccount<'info>,
 }
 
 #[init_computation_definition_accounts("register_dataset", payer)]
@@ -206,9 +215,15 @@ pub struct RegisterDatasetCallback<'info> {
 pub struct InitRegisterCompDef<'info> {
     #[account(mut)] pub payer: Signer<'info>,
     #[account(mut, address = derive_mxe_pda!())] pub mxe_account: Box<Account<'info, MXEAccount>>,
-    #[account(mut)] /// CHECK: not yet initialized. pub comp_def_account: UncheckedAccount<'info>,
-    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))] /// CHECK: arcium. pub address_lookup_table: UncheckedAccount<'info>,
-    #[account(address = LUT_PROGRAM_ID)] /// CHECK: LUT. pub lut_program: UncheckedAccount<'info>,
+    #[account(mut)]
+    /// CHECK: not yet initialized.
+    pub comp_def_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
+    /// CHECK: arcium.
+    pub address_lookup_table: UncheckedAccount<'info>,
+    #[account(address = LUT_PROGRAM_ID)]
+    /// CHECK: LUT.
+    pub lut_program: UncheckedAccount<'info>,
     pub arcium_program: Program<'info, Arcium>,
     pub system_program: Program<'info, System>,
 }
@@ -221,9 +236,15 @@ pub struct MatchDataset<'info> {
     #[account(init_if_needed, space = 9, payer = payer, seeds = [&SIGN_PDA_SEED], bump, address = derive_sign_pda!())]
     pub sign_pda_account: Account<'info, ArciumSignerAccount>,
     #[account(address = derive_mxe_pda!())] pub mxe_account: Box<Account<'info, MXEAccount>>,
-    #[account(mut, address = derive_mempool_pda!(mxe_account))] /// CHECK: arcium. pub mempool_account: UncheckedAccount<'info>,
-    #[account(mut, address = derive_execpool_pda!(mxe_account))] /// CHECK: arcium. pub executing_pool: UncheckedAccount<'info>,
-    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account))] /// CHECK: arcium. pub computation_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_mempool_pda!(mxe_account))]
+    /// CHECK: arcium.
+    pub mempool_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_execpool_pda!(mxe_account))]
+    /// CHECK: arcium.
+    pub executing_pool: UncheckedAccount<'info>,
+    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account))]
+    /// CHECK: arcium.
+    pub computation_account: UncheckedAccount<'info>,
     #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_MATCH))] pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
     #[account(mut, address = derive_cluster_pda!(mxe_account))] pub cluster_account: Box<Account<'info, Cluster>>,
     #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)] pub pool_account: Account<'info, FeePool>,
@@ -238,9 +259,12 @@ pub struct MatchDatasetCallback<'info> {
     pub arcium_program: Program<'info, Arcium>,
     #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_MATCH))] pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
     #[account(address = derive_mxe_pda!())] pub mxe_account: Account<'info, MXEAccount>,
-    /// CHECK: arcium. pub computation_account: UncheckedAccount<'info>,
+    /// CHECK: arcium.
+    pub computation_account: UncheckedAccount<'info>,
     #[account(address = derive_cluster_pda!(mxe_account))] pub cluster_account: Account<'info, Cluster>,
-    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)] /// CHECK: sysvar. pub instructions_sysvar: UncheckedAccount<'info>,
+    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
+    /// CHECK: sysvar.
+    pub instructions_sysvar: UncheckedAccount<'info>,
 }
 
 #[init_computation_definition_accounts("match_dataset", payer)]
@@ -248,9 +272,15 @@ pub struct MatchDatasetCallback<'info> {
 pub struct InitMatchCompDef<'info> {
     #[account(mut)] pub payer: Signer<'info>,
     #[account(mut, address = derive_mxe_pda!())] pub mxe_account: Box<Account<'info, MXEAccount>>,
-    #[account(mut)] /// CHECK: not yet initialized. pub comp_def_account: UncheckedAccount<'info>,
-    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))] /// CHECK: arcium. pub address_lookup_table: UncheckedAccount<'info>,
-    #[account(address = LUT_PROGRAM_ID)] /// CHECK: LUT. pub lut_program: UncheckedAccount<'info>,
+    #[account(mut)]
+    /// CHECK: not yet initialized.
+    pub comp_def_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
+    /// CHECK: arcium.
+    pub address_lookup_table: UncheckedAccount<'info>,
+    #[account(address = LUT_PROGRAM_ID)]
+    /// CHECK: LUT.
+    pub lut_program: UncheckedAccount<'info>,
     pub arcium_program: Program<'info, Arcium>,
     pub system_program: Program<'info, System>,
 }
@@ -263,9 +293,15 @@ pub struct AggregateGradient<'info> {
     #[account(init_if_needed, space = 9, payer = payer, seeds = [&SIGN_PDA_SEED], bump, address = derive_sign_pda!())]
     pub sign_pda_account: Account<'info, ArciumSignerAccount>,
     #[account(address = derive_mxe_pda!())] pub mxe_account: Box<Account<'info, MXEAccount>>,
-    #[account(mut, address = derive_mempool_pda!(mxe_account))] /// CHECK: arcium. pub mempool_account: UncheckedAccount<'info>,
-    #[account(mut, address = derive_execpool_pda!(mxe_account))] /// CHECK: arcium. pub executing_pool: UncheckedAccount<'info>,
-    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account))] /// CHECK: arcium. pub computation_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_mempool_pda!(mxe_account))]
+    /// CHECK: arcium.
+    pub mempool_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_execpool_pda!(mxe_account))]
+    /// CHECK: arcium.
+    pub executing_pool: UncheckedAccount<'info>,
+    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account))]
+    /// CHECK: arcium.
+    pub computation_account: UncheckedAccount<'info>,
     #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_AGGREGATE))] pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
     #[account(mut, address = derive_cluster_pda!(mxe_account))] pub cluster_account: Box<Account<'info, Cluster>>,
     #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)] pub pool_account: Account<'info, FeePool>,
@@ -280,21 +316,28 @@ pub struct AggregateGradientCallback<'info> {
     pub arcium_program: Program<'info, Arcium>,
     #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_AGGREGATE))] pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
     #[account(address = derive_mxe_pda!())] pub mxe_account: Account<'info, MXEAccount>,
-    /// CHECK: arcium. pub computation_account: UncheckedAccount<'info>,
+    /// CHECK: arcium.
+    pub computation_account: UncheckedAccount<'info>,
     #[account(address = derive_cluster_pda!(mxe_account))] pub cluster_account: Account<'info, Cluster>,
-    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)] /// CHECK: sysvar. pub instructions_sysvar: UncheckedAccount<'info>,
+    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
+    /// CHECK: sysvar.
+    pub instructions_sysvar: UncheckedAccount<'info>,
 }
 
 #[init_computation_definition_accounts("aggregate_gradient", payer)]
 #[derive(Accounts)]
 pub struct InitAggregateCompDef<'info> {
-    #[account(mut)] pub payer: Signer<'
-
-info>,
+    #[account(mut)] pub payer: Signer<'info>,
     #[account(mut, address = derive_mxe_pda!())] pub mxe_account: Box<Account<'info, MXEAccount>>,
-    #[account(mut)] /// CHECK: not yet initialized. pub comp_def_account: UncheckedAccount<'info>,
-    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))] /// CHECK: arcium. pub address_lookup_table: UncheckedAccount<'info>,
-    #[account(address = LUT_PROGRAM_ID)] /// CHECK: LUT. pub lut_program: UncheckedAccount<'info>,
+    #[account(mut)]
+    /// CHECK: not yet initialized.
+    pub comp_def_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
+    /// CHECK: arcium.
+    pub address_lookup_table: UncheckedAccount<'info>,
+    #[account(address = LUT_PROGRAM_ID)]
+    /// CHECK: LUT.
+    pub lut_program: UncheckedAccount<'info>,
     pub arcium_program: Program<'info, Arcium>,
     pub system_program: Program<'info, System>,
 }

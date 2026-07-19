@@ -101,4 +101,52 @@ mod circuits {
         let matched = credits_ok * price_ok * vintage_ok * cert_ok;
         request.owner.from_arcis(matched)
     }
+
+    pub struct ReputationData {
+        pub completed_trades: u64,
+        pub disputes_lost:    u64,
+        pub score:            u64,
+    }
+
+    pub struct ReputationEvent {
+        pub is_completion: bool,
+    }
+
+    #[instruction]
+    pub fn update_reputation(
+        data_ctxt:  Enc<Shared, ReputationData>,
+        event_ctxt: Enc<Shared, ReputationEvent>,
+    ) -> Enc<Shared, ReputationData> {
+        let mut data = data_ctxt.to_arcis();
+        let event    = event_ctxt.to_arcis();
+
+        if event.is_completion {
+            data.completed_trades += 1;
+        } else {
+            data.disputes_lost += 1;
+        }
+
+        let completion_score = data.completed_trades * 10;
+        let dispute_penalty  = data.disputes_lost * 25;
+        let raw_score = if completion_score > dispute_penalty {
+            completion_score - dispute_penalty
+        } else {
+            0
+        };
+        data.score = if raw_score > 1000 { 1000 } else { raw_score };
+
+        data_ctxt.owner.from_arcis(data)
+    }
+
+    pub struct ThresholdCheck {
+        pub score:     u64,
+        pub min_score: u64,
+    }
+
+    #[instruction]
+    pub fn check_threshold(request: Enc<Shared, ThresholdCheck>) -> Enc<Shared, u64> {
+        let r = request.to_arcis();
+        let passes = if r.score >= r.min_score { 1u64 } else { 0u64 };
+        request.owner.from_arcis(passes)
+    }
 }
