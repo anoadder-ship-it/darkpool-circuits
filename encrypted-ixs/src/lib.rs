@@ -4,114 +4,156 @@ use arcis::*;
 mod circuits {
     use arcis::*;
 
-    // Chip aanbod van een verkoper
-    pub struct ChipListing {
-        pub chip_type:      u64,  // H100=1001 H200=1002 GB200=1003 A100=1004 MI300X=2001 Gaudi3=3001
-        pub quantity:       u64,  // aantal units
-        pub condition:      u64,  // 1=nieuw 2=refurb 3=gebruikt
-        pub price_per_unit: u64,  // USD cents per chip
-        pub delivery_days:  u64,  // levertijd in dagen
-        pub region:         u64,  // 1=EU 2=US 3=Asia 4=global
-        pub cert_level:     u64,  // 1=datacenter 2=workstation 3=consumer
+    const ORDER_BOOK_SIZE: usize = 10;
+
+    pub struct Order {
+        pub bid:    u64,
+        pub size:   u64,
+        pub is_buy: bool,
+        pub owner:  [u8; 32],
+        pub active: bool,
     }
 
-    // Kooporder van een koper
-    pub struct ChipOrder {
-        pub chip_type:    u64,  // gewenst chiptype
-        pub min_quantity: u64,  // minimum aantal
-        pub max_condition:u64,  // slechtste acceptabele conditie (hoger=soepeler)
-        pub max_price:    u64,  // maximum prijs per chip (cents)
-        pub max_delivery: u64,  // maximum levertijd (dagen)
-        pub req_region:   u64,  // gewenste regio (4=global accepteert alles)
-        pub min_cert:     u64,  // minimum certificatieniveau
+    pub struct OrderBook {
+        pub orders: [Order; ORDER_BOOK_SIZE],
+        pub count:  u64,
     }
 
-    // Gecombineerde matchrequest (14 velden)
-    pub struct ChipMatchRequest {
-        // Aanbod velden
-        pub chip_type:      u64,
-        pub quantity:       u64,
-        pub condition:      u64,
-        pub price_per_unit: u64,
-        pub delivery_days:  u64,
-        pub list_region:    u64,
-        pub cert_level:     u64,
-        // Aanvraag velden
-        pub req_chip_type:  u64,
-        pub min_quantity:   u64,
-        pub max_condition:  u64,
-        pub max_price:      u64,
-        pub max_delivery:   u64,
-        pub req_region:     u64,
-        pub min_cert:       u64,
+    pub struct NewOrder {
+        pub bid:    u64,
+        pub size:   u64,
+        pub is_buy: bool,
+        pub owner:  [u8; 32],
     }
 
-    pub struct ChipMatchResult {
-        pub matched: u64,  // 1=match 0=geen match
-        pub score:   u64,  // 0-98 (7 criteria x 14 punten)
+    pub struct MatchResult {
+        pub buy_owner:     [u8; 32],
+        pub sell_owner:    [u8; 32],
+        pub matched_size:  u64,
+        pub matched_price: u64,
+        pub matched:       bool,
     }
 
-    /// Registreer een versleuteld chip aanbod
+    pub struct BookStats {
+        pub total_orders: u64,
+        pub buy_volume:   u64,
+        pub sell_volume:  u64,
+    }
+
     #[instruction]
-    pub fn register_chip(listing: Enc<Shared, ChipListing>) -> Enc<Shared, u64> {
-        let _l = listing.to_arcis();
-        listing.owner.from_arcis(1u64)
+    pub fn place_order(
+        book_ctxt:  Enc<Shared, OrderBook>,
+        order_ctxt: Enc<Shared, NewOrder>,
+    ) -> Enc<Shared, OrderBook> {
+        let mut book    = book_ctxt.to_arcis();
+        let new_order   = order_ctxt.to_arcis();
+        let mut placed  = false;
+
+        for i in 0..ORDER_BOOK_SIZE {
+            if !book.orders[i].active && !placed {
+                book.orders[i].bid    = new_order.bid;
+                book.orders[i].size   = new_order.size;
+                book.orders[i].is_buy = new_order.is_buy;
+                book.orders[i].owner  = new_order.owner;
+                book.orders[i].active = true;
+                book.count += 1;
+                placed = true;
+            }
+        }
+
+        book_ctxt.owner.from_arcis(book)
     }
 
-    /// Match chip aanbod met kooporder — volledig encrypted
-    /// Zeven criteria: type exact, qty voldoende, conditie ok, prijs ok,
-    ///   levering ok, regio ok, certificering ok
     #[instruction]
-    pub fn match_chip(request: Enc<Shared, ChipMatchRequest>) -> Enc<Shared, ChipMatchResult> {
-        let r = request.to_arcis();
+    pub fn match_orders(
+        book_ctxt: Enc<Shared, OrderBook>,
+    ) -> Enc<Shared, MatchResult> {
+        let book = book_ctxt.to_arcis();
 
-        // Criterium 1: chiptype moet exact overeenkomen
-        let c1 = if r.chip_type == r.req_chip_type { 1u64 } else { 0u64 };
+        let mut result = MatchResult {
+            buy_owner:     [0u8; 32],
+            sell_owner:    [0u8; 32],
+            matched_size:  0,
+            matched_price: 0,
+            matched:       false,
+        };
 
-        // Criterium 2: aanbod heeft genoeg units
-        let c2 = if r.quantity >= r.min_quantity { 1u64 } else { 0u64 };
+        for i in 0..ORDER_BOOK_SIZE {
+            if book.orders[i].active && book.orders[i].is_buy && !result.matched {
+                for j in 0..ORDER_BOOK_SIZE {
+                    if book.orders[j].active
+                        && !book.orders[j].is_buy
+                        && !result.matched
+                        && book.orders[i].bid >= book.orders[j].bid
+                    {
+                        let size = if book.orders[i].size < book.orders[j].size {
+                            book.orders[i].size
+                        } else {
+                            book.orders[j].size
+                        };
+                        result.buy_owner     = book.orders[i].owner;
+                        result.sell_owner    = book.orders[j].owner;
+                        result.matched_size  = size;
+                        result.matched_price = (book.orders[i].bid + book.orders[j].bid) / 2;
+                        result.matched       = true;
+                    }
+                }
+            }
+        }
 
-        // Criterium 3: conditie is acceptabel (lager=beter, buyer stelt max in)
-        let c3 = if r.condition <= r.max_condition { 1u64 } else { 0u64 };
-
-        // Criterium 4: prijs is binnen budget
-        let c4 = if r.price_per_unit <= r.max_price { 1u64 } else { 0u64 };
-
-        // Criterium 5: levering snel genoeg
-        let c5 = if r.delivery_days <= r.max_delivery { 1u64 } else { 0u64 };
-
-        // Criterium 6: regio klopt (4=global = accepteer altijd)
-        let c6 = if r.list_region == r.req_region { 1u64 }
-                 else if r.list_region == 4u64     { 1u64 }
-                 else if r.req_region  == 4u64     { 1u64 }
-                 else { 0u64 };
-
-        // Criterium 7: certificering voldoende (hoger=beter)
-        let c7 = if r.cert_level >= r.min_cert { 1u64 } else { 0u64 };
-
-        // Match alleen als alle 7 criteria kloppen
-        let matched = c1 * c2 * c3 * c4 * c5 * c6 * c7;
-
-        // Score: elk criterium 14 punten (max 98)
-        let score = (c1 + c2 + c3 + c4 + c5 + c6 + c7) * 14u64;
-
-        let result = ChipMatchResult { matched, score };
-        request.owner.from_arcis(result)
+        book_ctxt.owner.from_arcis(result)
     }
 
-    /// Versleutelde volumeaggregatie voor marktintelligentie
-    pub struct VolumeData {
-        pub chip_type: u64,
-        pub volume:    u64,  // aantal chips in deze batch
-        pub price:     u64,  // totale waarde (cents)
-    }
-
-    /// Aggregeer volumes van twee partijen zonder individuele data te onthullen
     #[instruction]
-    pub fn aggregate_volume(data: Enc<Shared, VolumeData>) -> Enc<Shared, u64> {
-        let d = data.to_arcis();
-        // Retourneert totaal volume — kan later uitgebreid worden
-        // voor multi-party aggregatie
-        data.owner.from_arcis(d.volume)
+    pub fn cancel_order(
+        book_ctxt:  Enc<Shared, OrderBook>,
+        owner_ctxt: Enc<Shared, [u8; 32]>,
+    ) -> Enc<Shared, OrderBook> {
+        let mut book      = book_ctxt.to_arcis();
+        let     owner     = owner_ctxt.to_arcis();
+        let mut cancelled = false;
+
+        for i in 0..ORDER_BOOK_SIZE {
+            if book.orders[i].active
+                && book.orders[i].owner == owner
+                && !cancelled
+            {
+                book.orders[i].active = false;
+                book.orders[i].bid    = 0;
+                book.orders[i].size   = 0;
+                if book.count > 0 {
+                    book.count -= 1;
+                }
+                cancelled = true;
+            }
+        }
+
+        book_ctxt.owner.from_arcis(book)
+    }
+
+    #[instruction]
+    pub fn get_stats(
+        book_ctxt: Enc<Shared, OrderBook>,
+    ) -> Enc<Shared, BookStats> {
+        let book = book_ctxt.to_arcis();
+
+        let mut stats = BookStats {
+            total_orders: 0,
+            buy_volume:   0,
+            sell_volume:  0,
+        };
+
+        for i in 0..ORDER_BOOK_SIZE {
+            if book.orders[i].active {
+                stats.total_orders += 1;
+                if book.orders[i].is_buy {
+                    stats.buy_volume  += book.orders[i].size;
+                } else {
+                    stats.sell_volume += book.orders[i].size;
+                }
+            }
+        }
+
+        book_ctxt.owner.from_arcis(stats)
     }
 }
