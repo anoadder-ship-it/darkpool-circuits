@@ -107,6 +107,10 @@ pub mod chip_darkpool {
         nonce:  u128,
     ) -> Result<()> {
         require!(ctx.accounts.moeras_pool.status == PoolStatus::Active, ErrorCode::MoerasModeActive);
+        require!(
+            Clock::get()?.unix_timestamp < ctx.accounts.compliance_attestation.expires_at,
+            ErrorCode::AttestationExpired
+        );
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
         let args = ArgBuilder::new()
             .x25519_pubkey(pubkey)
@@ -308,6 +312,24 @@ pub mod chip_darkpool {
         msg!("Pool geinitialiseerd, guardian: {}", pool.guardian);
         Ok(())
     }
+    // Exportcontrole: koper goedkeuren (alleen door de multisig-vault)
+    pub fn approve_buyer(ctx: Context<ApproveBuyer>, region_code: u16, expires_at: i64) -> Result<()> {
+        let att = &mut ctx.accounts.attestation;
+        att.buyer = ctx.accounts.buyer.key();
+        att.approved = true;
+        att.region_code = region_code;
+        att.approved_by = ctx.accounts.authority.key();
+        att.expires_at = expires_at;
+        msg!("Koper goedgekeurd voor export: {}", att.buyer);
+        Ok(())
+    }
+    // Exportcontrole: goedkeuring intrekken (alleen door de multisig-vault)
+    pub fn revoke_buyer(ctx: Context<RevokeBuyer>) -> Result<()> {
+        let att = &mut ctx.accounts.attestation;
+        att.approved = false;
+        msg!("Goedkeuring ingetrokken voor: {}", att.buyer);
+        Ok(())
+    }
     // Heartbeat functie
     pub fn send_heartbeat(ctx: Context<SendHeartbeat>) -> Result<()> {
         let pool = &mut ctx.accounts.pool;
@@ -334,6 +356,41 @@ pub mod chip_darkpool {
     }
 }
 
+
+// ComplianceAttestation account (exportcontrole)
+#[account]
+pub struct ComplianceAttestation {
+    pub buyer: Pubkey,
+    pub approved: bool,
+    pub region_code: u16,
+    pub approved_by: Pubkey,
+    pub expires_at: i64,
+}
+// ApproveBuyer accounts context
+#[derive(Accounts)]
+pub struct ApproveBuyer<'info> {
+    #[account(
+        init_if_needed,
+        payer = authority,
+        space = 8 + 32 + 1 + 2 + 32 + 8,
+        seeds = [b"compliance", buyer.key().as_ref()],
+        bump
+    )]
+    pub attestation: Account<'info, ComplianceAttestation>,
+    /// CHECK: dit is enkel een adresverwijzing naar de koper die goedgekeurd wordt.
+    pub buyer: UncheckedAccount<'info>,
+    #[account(mut, address = VAULT_PDA)]
+    pub authority: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+// RevokeBuyer accounts context
+#[derive(Accounts)]
+pub struct RevokeBuyer<'info> {
+    #[account(mut, seeds = [b"compliance", attestation.buyer.as_ref()], bump)]
+    pub attestation: Account<'info, ComplianceAttestation>,
+    #[account(address = VAULT_PDA)]
+    pub authority: Signer<'info>,
+}
 
 // PoolStatus enum
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq)]
@@ -463,6 +520,9 @@ pub struct MatchChip<'info> {
     #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_MATCH))]
     pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
     pub moeras_pool: Account<'info, PoolState>,
+    #[account(seeds = [b"compliance", payer.key().as_ref()], bump,
+        constraint = compliance_attestation.approved @ ErrorCode::BuyerNotApproved)]
+    pub compliance_attestation: Account<'info, ComplianceAttestation>,
     #[account(mut, address = derive_cluster_pda!(mxe_account))]
     pub cluster_account: Box<Account<'info, Cluster>>,
     #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
@@ -594,6 +654,10 @@ pub enum ErrorCode {
     UnauthorizedGuardian,
     #[msg("Moeras-modus is actief: dit is tijdelijk bevroren voor beveiligingsonderzoek")]
     MoerasModeActive,
+    #[msg("Deze koper is niet goedgekeurd voor export-gecontroleerde handel")]
+    BuyerNotApproved,
+    #[msg("De exportgoedkeuring van deze koper is verlopen")]
+    AttestationExpired,
 }
 
 // ============================================================
