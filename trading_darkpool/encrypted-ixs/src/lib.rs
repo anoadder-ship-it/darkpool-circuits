@@ -4,14 +4,16 @@ use arcis::*;
 mod circuits {
     use arcis::*;
 
-    const ORDER_BOOK_SIZE: usize = 10;
+    const ORDER_BOOK_SIZE: usize = 25;
 
+    #[derive(Clone, Copy)]
     pub struct Order {
-        pub bid:    u64,
-        pub size:   u64,
-        pub is_buy: bool,
-        pub owner:  [u8; 32],
-        pub active: bool,
+        pub asset_id: u64,
+        pub bid:      u64,
+        pub size:     u64,
+        pub is_buy:   bool,
+        pub owner:    [u8; 32],
+        pub active:   bool,
     }
 
     pub struct OrderBook {
@@ -20,13 +22,15 @@ mod circuits {
     }
 
     pub struct NewOrder {
-        pub bid:    u64,
-        pub size:   u64,
-        pub is_buy: bool,
-        pub owner:  [u8; 32],
+        pub asset_id: u64,
+        pub bid:      u64,
+        pub size:     u64,
+        pub is_buy:   bool,
+        pub owner:    [u8; 32],
     }
 
     pub struct MatchResult {
+        pub asset_id:      u64,
         pub buy_owner:     [u8; 32],
         pub sell_owner:    [u8; 32],
         pub matched_size:  u64,
@@ -41,36 +45,87 @@ mod circuits {
     }
 
     #[instruction]
+    pub fn init_order_book() -> Enc<Mxe, OrderBook> {
+        let empty_order = Order {
+            asset_id: 0,
+            bid:      0,
+            size:     0,
+            is_buy:   false,
+            owner:    [0u8; 32],
+            active:   false,
+        };
+        let book = OrderBook {
+            orders: [empty_order; ORDER_BOOK_SIZE],
+            count:  0,
+        };
+        Mxe::get().from_arcis(book)
+    }
+
+    #[instruction]
     pub fn place_order(
-        book_ctxt:  Enc<Shared, OrderBook>,
+        book_ctxt:  Enc<Mxe, OrderBook>,
         order_ctxt: Enc<Shared, NewOrder>,
-    ) -> Enc<Shared, OrderBook> {
+    ) -> Enc<Mxe, OrderBook> {
         let mut book    = book_ctxt.to_arcis();
         let new_order   = order_ctxt.to_arcis();
         let mut placed  = false;
 
         for i in 0..ORDER_BOOK_SIZE {
             if !book.orders[i].active && !placed {
-                book.orders[i].bid    = new_order.bid;
-                book.orders[i].size   = new_order.size;
-                book.orders[i].is_buy = new_order.is_buy;
-                book.orders[i].owner  = new_order.owner;
-                book.orders[i].active = true;
+                book.orders[i].asset_id = new_order.asset_id;
+                book.orders[i].bid      = new_order.bid;
+                book.orders[i].size     = new_order.size;
+                book.orders[i].is_buy   = new_order.is_buy;
+                book.orders[i].owner    = new_order.owner;
+                book.orders[i].active   = true;
                 book.count += 1;
                 placed = true;
             }
         }
 
-        book_ctxt.owner.from_arcis(book)
+        Mxe::get().from_arcis(book)
     }
 
     #[instruction]
     pub fn match_orders(
-        book_ctxt: Enc<Shared, OrderBook>,
+        book_ctxt:  Enc<Mxe, OrderBook>,
+        asset_ctxt: Enc<Shared, u64>,
     ) -> Enc<Shared, MatchResult> {
-        let book = book_ctxt.to_arcis();
+        let book         = book_ctxt.to_arcis();
+        let target_asset = asset_ctxt.to_arcis();
+
+        let mut has_buy   = false;
+        let mut buy_bid:   u64      = 0;
+        let mut buy_size:  u64      = 0;
+        let mut buy_owner: [u8; 32] = [0u8; 32];
+
+        let mut has_sell   = false;
+        let mut sell_bid:   u64      = 0;
+        let mut sell_size:  u64      = 0;
+        let mut sell_owner: [u8; 32] = [0u8; 32];
+
+        for i in 0..ORDER_BOOK_SIZE {
+            if book.orders[i].active && book.orders[i].asset_id == target_asset {
+                if book.orders[i].is_buy {
+                    if !has_buy || book.orders[i].bid > buy_bid {
+                        has_buy   = true;
+                        buy_bid   = book.orders[i].bid;
+                        buy_size  = book.orders[i].size;
+                        buy_owner = book.orders[i].owner;
+                    }
+                } else {
+                    if !has_sell || book.orders[i].bid < sell_bid {
+                        has_sell   = true;
+                        sell_bid   = book.orders[i].bid;
+                        sell_size  = book.orders[i].size;
+                        sell_owner = book.orders[i].owner;
+                    }
+                }
+            }
+        }
 
         let mut result = MatchResult {
+            asset_id:      target_asset,
             buy_owner:     [0u8; 32],
             sell_owner:    [0u8; 32],
             matched_size:  0,
@@ -78,44 +133,77 @@ mod circuits {
             matched:       false,
         };
 
+        if has_buy && has_sell && buy_bid >= sell_bid {
+            result.buy_owner     = buy_owner;
+            result.sell_owner    = sell_owner;
+            result.matched_size  = if buy_size < sell_size { buy_size } else { sell_size };
+            result.matched_price = (buy_bid + sell_bid) / 2;
+            result.matched        = true;
+        }
+
+        asset_ctxt.owner.from_arcis(result)
+    }
+
+    #[instruction]
+    pub fn settle_match(
+        book_ctxt:  Enc<Mxe, OrderBook>,
+        asset_ctxt: Enc<Shared, u64>,
+    ) -> Enc<Mxe, OrderBook> {
+        let mut book     = book_ctxt.to_arcis();
+        let target_asset = asset_ctxt.to_arcis();
+
+        let mut best_buy_idx:  i64 = -1;
+        let mut best_buy_bid:  u64 = 0;
+        let mut best_sell_idx: i64 = -1;
+        let mut best_sell_bid: u64 = 0;
+
         for i in 0..ORDER_BOOK_SIZE {
-            if book.orders[i].active && book.orders[i].is_buy && !result.matched {
-                for j in 0..ORDER_BOOK_SIZE {
-                    if book.orders[j].active
-                        && !book.orders[j].is_buy
-                        && !result.matched
-                        && book.orders[i].bid >= book.orders[j].bid
-                    {
-                        let size = if book.orders[i].size < book.orders[j].size {
-                            book.orders[i].size
-                        } else {
-                            book.orders[j].size
-                        };
-                        result.buy_owner     = book.orders[i].owner;
-                        result.sell_owner    = book.orders[j].owner;
-                        result.matched_size  = size;
-                        result.matched_price = (book.orders[i].bid + book.orders[j].bid) / 2;
-                        result.matched       = true;
+            if book.orders[i].active && book.orders[i].asset_id == target_asset {
+                if book.orders[i].is_buy {
+                    if best_buy_idx == -1 || book.orders[i].bid > best_buy_bid {
+                        best_buy_idx = i as i64;
+                        best_buy_bid = book.orders[i].bid;
+                    }
+                } else {
+                    if best_sell_idx == -1 || book.orders[i].bid < best_sell_bid {
+                        best_sell_idx = i as i64;
+                        best_sell_bid = book.orders[i].bid;
                     }
                 }
             }
         }
 
-        book_ctxt.owner.from_arcis(result)
+        if best_buy_idx != -1 && best_sell_idx != -1 && best_buy_bid >= best_sell_bid {
+            for i in 0..ORDER_BOOK_SIZE {
+                if (i as i64) == best_buy_idx || (i as i64) == best_sell_idx {
+                    book.orders[i].active = false;
+                    book.orders[i].bid    = 0;
+                    book.orders[i].size   = 0;
+                    if book.count > 0 {
+                        book.count -= 1;
+                    }
+                }
+            }
+        }
+
+        Mxe::get().from_arcis(book)
     }
 
     #[instruction]
     pub fn cancel_order(
-        book_ctxt:  Enc<Shared, OrderBook>,
+        book_ctxt:  Enc<Mxe, OrderBook>,
         owner_ctxt: Enc<Shared, [u8; 32]>,
-    ) -> Enc<Shared, OrderBook> {
+        asset_ctxt: Enc<Shared, u64>,
+    ) -> Enc<Mxe, OrderBook> {
         let mut book      = book_ctxt.to_arcis();
         let     owner     = owner_ctxt.to_arcis();
+        let     asset_id  = asset_ctxt.to_arcis();
         let mut cancelled = false;
 
         for i in 0..ORDER_BOOK_SIZE {
             if book.orders[i].active
                 && book.orders[i].owner == owner
+                && book.orders[i].asset_id == asset_id
                 && !cancelled
             {
                 book.orders[i].active = false;
@@ -128,13 +216,13 @@ mod circuits {
             }
         }
 
-        book_ctxt.owner.from_arcis(book)
+        Mxe::get().from_arcis(book)
     }
 
     #[instruction]
     pub fn get_stats(
-        book_ctxt: Enc<Shared, OrderBook>,
-    ) -> Enc<Shared, BookStats> {
+        book_ctxt: Enc<Mxe, OrderBook>,
+    ) -> Enc<Mxe, BookStats> {
         let book = book_ctxt.to_arcis();
 
         let mut stats = BookStats {
@@ -154,7 +242,7 @@ mod circuits {
             }
         }
 
-        book_ctxt.owner.from_arcis(stats)
+        Mxe::get().from_arcis(stats)
     }
 
     pub struct ReputationData {
