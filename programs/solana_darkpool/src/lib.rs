@@ -1,16 +1,17 @@
 use anchor_lang::prelude::*;
 use arcium_anchor::prelude::*;
 use arcium_macros::circuit_hash;
-use arcium_client::idl::arcium::types::{OffChainCircuitSource, CircuitSource};
+use arcium_client::idl::arcium::types::{OffChainCircuitSource, CircuitSource, CallbackAccount, CallbackInstruction};
 
 const COMP_DEF_OFFSET_PLACE_ORDER:  u32 = comp_def_offset("place_order");
 const COMP_DEF_OFFSET_MATCH_ORDERS: u32 = comp_def_offset("match_orders");
 const COMP_DEF_OFFSET_CANCEL_ORDER: u32 = comp_def_offset("cancel_order");
 const COMP_DEF_OFFSET_GET_STATS:    u32 = comp_def_offset("get_stats");
+const COMP_DEF_OFFSET_INIT_ORDER_BOOK: u32 = comp_def_offset("init_order_book");
 const COMP_DEF_OFFSET_UPDATE_REPUTATION: u32 = comp_def_offset("update_reputation");
 const COMP_DEF_OFFSET_CHECK_THRESHOLD:   u32 = comp_def_offset("check_threshold");
 
-declare_id!("h6zsnHt28NpeS94Ek3fQP1YEiu1WrpGT2pKynWZzKVX");
+declare_id!("FiNnbmFNn9BfRNKarLSqVtnKvQ9JwcuUvHxZjvMbDVDL");
 
 // PoolStatus enum
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +66,7 @@ const PLACE_ORDER_URL:  &str = "https://github.com/anoadder-ship-it/darkpool-cir
 const MATCH_ORDERS_URL: &str = "https://github.com/anoadder-ship-it/darkpool-circuits/releases/download/v0.11.4/match_orders.arcis";
 const CANCEL_ORDER_URL: &str = "https://github.com/anoadder-ship-it/darkpool-circuits/releases/download/v0.11.4/cancel_order.arcis";
 const GET_STATS_URL:    &str = "https://github.com/anoadder-ship-it/darkpool-circuits/releases/download/v0.11.4/get_stats.arcis";
+const INIT_ORDER_BOOK_URL: &str = "https://github.com/anoadder-ship-it/darkpool-circuits/releases/download/v0.12.0/init_order_book.arcis";
 const UPDATE_REPUTATION_URL: &str = "https://github.com/anoadder-ship-it/darkpool-circuits/releases/download/v0.11.5/update_reputation.arcis";
 const CHECK_THRESHOLD_URL:   &str = "https://github.com/anoadder-ship-it/darkpool-circuits/releases/download/v0.11.5/check_threshold.arcis";
 
@@ -384,6 +386,58 @@ pub mod solana_darkpool {
             Err(_) => return Err(ErrorCode::AbortedComputation.into()),
         };
         emit!(ThresholdCheckedEvent { passes: o.ciphertexts[0], nonce: o.nonce.to_le_bytes() });
+        Ok(())
+    }
+
+    pub fn init_init_order_book_comp_def(ctx: Context<InitInitOrderBookCompDef>) -> Result<()> {
+        init_computation_def(ctx.accounts, Some(CircuitSource::OffChain(OffChainCircuitSource {
+            source: INIT_ORDER_BOOK_URL.to_string(),
+            hash: circuit_hash!("init_order_book"),
+        })))?;
+        Ok(())
+    }
+
+    pub fn initialize_order_book(
+        ctx: Context<InitializeOrderBook>,
+        computation_offset: u64,
+    ) -> Result<()> {
+        ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+        let args = ArgBuilder::new().build();
+        let callback_ix = CallbackInstruction {
+            program_id: ID_CONST,
+            discriminator: instruction::InitOrderBookCallback::DISCRIMINATOR.to_vec(),
+            accounts: vec![
+                CallbackAccount { pubkey: ctx.accounts.arcium_program.key(), is_writable: false },
+                CallbackAccount { pubkey: derive_comp_def_pda!(COMP_DEF_OFFSET_INIT_ORDER_BOOK), is_writable: false },
+                CallbackAccount { pubkey: derive_mxe_pda!(), is_writable: false },
+                CallbackAccount { pubkey: derive_cluster_pda!(ctx.accounts.mxe_account), is_writable: false },
+                CallbackAccount { pubkey: ::arcium_anchor::solana_instructions_sysvar::ID, is_writable: false },
+                CallbackAccount { pubkey: ctx.accounts.order_book_state.key(), is_writable: true },
+            ],
+        };
+        queue_computation(
+            ctx.accounts, computation_offset, args,
+            vec![callback_ix],
+            1, 0, 0,
+        )?;
+        Ok(())
+    }
+
+    #[arcium_callback(encrypted_ix = "init_order_book")]
+    pub fn init_order_book_callback(
+        ctx: Context<InitOrderBookCallback>,
+        output: SignedComputationOutputs<InitOrderBookOutput>,
+    ) -> Result<()> {
+        let o = match output.verify_output(&ctx.accounts.cluster_account, &ctx.accounts.computation_account) {
+            Ok(InitOrderBookOutput { field_0 }) => field_0,
+            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+        };
+        let data = ctx.accounts.order_book_state.to_account_info();
+        let mut bytes = data.try_borrow_mut_data()?;
+        for (i, ct) in o.ciphertexts.iter().enumerate() {
+            let start = 8 + i * 32;
+            bytes[start..start + 32].copy_from_slice(ct);
+        }
         Ok(())
     }
 
@@ -895,6 +949,84 @@ pub struct CheckThresholdCallback<'info> {
     #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
     /// CHECK: sysvar.
     pub instructions_sysvar: UncheckedAccount<'info>,
+}
+
+pub const ORDER_BOOK_CT_LEN: usize = 6001;
+
+#[account]
+pub struct OrderBookState {
+    pub ciphertexts: [[u8; 32]; ORDER_BOOK_CT_LEN],
+}
+impl OrderBookState {
+    pub const SPACE: usize = 8 + ORDER_BOOK_CT_LEN * 32;
+}
+
+#[init_computation_definition_accounts("init_order_book", payer)]
+#[derive(Accounts)]
+pub struct InitInitOrderBookCompDef<'info> {
+    #[account(mut)] pub payer: Signer<'info>,
+    #[account(mut, address = derive_mxe_pda!())] pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut)]
+    /// CHECK: not yet initialized.
+    pub comp_def_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
+    /// CHECK: arcium.
+    pub address_lookup_table: UncheckedAccount<'info>,
+    #[account(address = LUT_PROGRAM_ID)]
+    /// CHECK: LUT.
+    pub lut_program: UncheckedAccount<'info>,
+    pub arcium_program: Program<'info, Arcium>,
+    pub system_program: Program<'info, System>,
+}
+
+#[queue_computation_accounts("init_order_book", payer)]
+#[derive(Accounts)]
+#[instruction(computation_offset: u64)]
+pub struct InitializeOrderBook<'info> {
+    #[account(mut)] pub payer: Signer<'info>,
+    #[account(init_if_needed, space = 9, payer = payer, seeds = [&SIGN_PDA_SEED], bump, address = derive_sign_pda!())]
+    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
+    #[account(address = derive_mxe_pda!())] pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut, address = derive_mempool_pda!(mxe_account))]
+    /// CHECK: arcium.
+    pub mempool_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_execpool_pda!(mxe_account))]
+    /// CHECK: arcium.
+    pub executing_pool: UncheckedAccount<'info>,
+    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account))]
+    /// CHECK: arcium.
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_INIT_ORDER_BOOK))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+    #[account(mut, address = derive_cluster_pda!(mxe_account))]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+    #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
+    pub pool_account: Account<'info, FeePool>,
+    #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
+    pub clock_account: Account<'info, ClockAccount>,
+    #[account(init, payer = payer, space = OrderBookState::SPACE, seeds = [b"order_book"], bump)]
+    pub order_book_state: Box<Account<'info, OrderBookState>>,
+    pub system_program: Program<'info, System>,
+    pub arcium_program: Program<'info, Arcium>,
+}
+
+#[callback_accounts("init_order_book")]
+#[derive(Accounts)]
+pub struct InitOrderBookCallback<'info> {
+    pub arcium_program: Program<'info, Arcium>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_INIT_ORDER_BOOK))]
+    pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Account<'info, MXEAccount>,
+    /// CHECK: arcium.
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_cluster_pda!(mxe_account))]
+    pub cluster_account: Account<'info, Cluster>,
+    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
+    /// CHECK: sysvar.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+    #[account(mut, seeds = [b"order_book"], bump)]
+    pub order_book_state: Box<Account<'info, OrderBookState>>,
 }
 
 #[event] pub struct OrderPlacedEvent    { pub result: [u8; 32], pub nonce: [u8; 16] }
