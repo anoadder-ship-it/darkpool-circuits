@@ -6,12 +6,16 @@ use arcium_client::idl::arcium::types::{OffChainCircuitSource, CircuitSource};
 const COMP_DEF_OFFSET_REGISTER_SUPPLY: u32 = comp_def_offset("register_supply");
 const COMP_DEF_OFFSET_MATCH_SUPPLY:    u32 = comp_def_offset("match_supply");
 const COMP_DEF_OFFSET_MATCH_CARBON:    u32 = comp_def_offset("match_carbon");
+const COMP_DEF_OFFSET_UPDATE_REPUTATION: u32 = comp_def_offset("update_reputation");
+const COMP_DEF_OFFSET_CHECK_THRESHOLD:   u32 = comp_def_offset("check_threshold");
 
 declare_id!("3HQHpSBSgYkx81E25bSJZVz4mGoW6nQFJWDtZL9fmMR4");
 
 const REGISTER_SUPPLY_URL: &str = "https://github.com/anoadder-ship-it/supply-chain-circuits/releases/download/v0.1.0/register_supply.arcis";
 const MATCH_SUPPLY_URL:    &str = "https://github.com/anoadder-ship-it/supply-chain-circuits/releases/download/v0.1.0/match_supply.arcis";
 const MATCH_CARBON_URL:    &str = "https://github.com/anoadder-ship-it/supply-chain-circuits/releases/download/v0.1.0/match_carbon.arcis";
+const UPDATE_REPUTATION_URL: &str = "https://github.com/anoadder-ship-it/supply-chain-circuits/releases/download/v0.2.0/update_reputation.arcis";
+const CHECK_THRESHOLD_URL:   &str = "https://github.com/anoadder-ship-it/supply-chain-circuits/releases/download/v0.2.0/check_threshold.arcis";
 
 #[arcium_program]
 pub mod supply_chain_darkpool {
@@ -198,6 +202,99 @@ pub mod supply_chain_darkpool {
     // resolve_dispute. Zonder dispute binnen de termijn mag de
     // verkoper zelf claimen.
     // ============================================================
+
+    pub fn init_update_reputation_comp_def(ctx: Context<InitUpdateReputationCompDef>) -> Result<()> {
+        init_computation_def(ctx.accounts, Some(CircuitSource::OffChain(OffChainCircuitSource {
+            source: UPDATE_REPUTATION_URL.to_string(),
+            hash: circuit_hash!("update_reputation"),
+        })))?;
+        Ok(())
+    }
+
+    pub fn init_check_threshold_comp_def(ctx: Context<InitCheckThresholdCompDef>) -> Result<()> {
+        init_computation_def(ctx.accounts, Some(CircuitSource::OffChain(OffChainCircuitSource {
+            source: CHECK_THRESHOLD_URL.to_string(),
+            hash: circuit_hash!("check_threshold"),
+        })))?;
+        Ok(())
+    }
+
+    pub fn update_reputation(
+        ctx: Context<UpdateReputation>,
+        computation_offset: u64,
+        enc_completed_trades: [u8; 32],
+        enc_disputes_lost:    [u8; 32],
+        enc_score:            [u8; 32],
+        enc_is_completion:    [u8; 32],
+        pubkey: [u8; 32],
+        nonce:  u128,
+    ) -> Result<()> {
+        ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+        let args = ArgBuilder::new()
+            .x25519_pubkey(pubkey)
+            .plaintext_u128(nonce)
+            .encrypted_u64(enc_completed_trades)
+            .encrypted_u64(enc_disputes_lost)
+            .encrypted_u64(enc_score)
+            .encrypted_u64(enc_is_completion)
+            .build();
+        queue_computation(ctx.accounts, computation_offset, args,
+            vec![UpdateReputationCallback::callback_ix(computation_offset, &ctx.accounts.mxe_account, &[])?],
+            1, 0, 0)?;
+        Ok(())
+    }
+
+    #[arcium_callback(encrypted_ix = "update_reputation")]
+    pub fn update_reputation_callback(
+        ctx: Context<UpdateReputationCallback>,
+        output: SignedComputationOutputs<UpdateReputationOutput>,
+    ) -> Result<()> {
+        let o = match output.verify_output(&ctx.accounts.cluster_account, &ctx.accounts.computation_account) {
+            Ok(UpdateReputationOutput { field_0 }) => field_0,
+            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+        };
+        emit!(ReputationUpdatedEvent {
+            completed_trades: o.ciphertexts[0],
+            disputes_lost:    o.ciphertexts[1],
+            score:             o.ciphertexts[2],
+            nonce:             o.nonce.to_le_bytes(),
+        });
+        Ok(())
+    }
+
+    pub fn check_threshold(
+        ctx: Context<CheckThreshold>,
+        computation_offset: u64,
+        enc_score:     [u8; 32],
+        enc_min_score: [u8; 32],
+        pubkey: [u8; 32],
+        nonce:  u128,
+    ) -> Result<()> {
+        ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+        let args = ArgBuilder::new()
+            .x25519_pubkey(pubkey)
+            .plaintext_u128(nonce)
+            .encrypted_u64(enc_score)
+            .encrypted_u64(enc_min_score)
+            .build();
+        queue_computation(ctx.accounts, computation_offset, args,
+            vec![CheckThresholdCallback::callback_ix(computation_offset, &ctx.accounts.mxe_account, &[])?],
+            1, 0, 0)?;
+        Ok(())
+    }
+
+    #[arcium_callback(encrypted_ix = "check_threshold")]
+    pub fn check_threshold_callback(
+        ctx: Context<CheckThresholdCallback>,
+        output: SignedComputationOutputs<CheckThresholdOutput>,
+    ) -> Result<()> {
+        let o = match output.verify_output(&ctx.accounts.cluster_account, &ctx.accounts.computation_account) {
+            Ok(CheckThresholdOutput { field_0 }) => field_0,
+            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+        };
+        emit!(ThresholdCheckedEvent { passes: o.ciphertexts[0], nonce: o.nonce.to_le_bytes() });
+        Ok(())
+    }
 
     pub fn create_escrow(ctx: Context<CreateEscrow>, amount: u64, seller: Pubkey, seed_id: u64) -> Result<()> {
         require!(amount > 0, ErrorCode::InvalidEscrowAmount);
@@ -577,9 +674,139 @@ pub struct InitMatchCarbonCompDef<'info> {
     pub system_program: Program<'info, System>,
 }
 
+#[init_computation_definition_accounts("update_reputation", payer)]
+#[derive(Accounts)]
+pub struct InitUpdateReputationCompDef<'info> {
+    #[account(mut)] pub payer: Signer<'info>,
+    #[account(mut, address = derive_mxe_pda!())] pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut)]
+    /// CHECK: not yet initialized.
+    pub comp_def_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
+    /// CHECK: arcium.
+    pub address_lookup_table: UncheckedAccount<'info>,
+    #[account(address = LUT_PROGRAM_ID)]
+    /// CHECK: LUT.
+    pub lut_program: UncheckedAccount<'info>,
+    pub arcium_program: Program<'info, Arcium>,
+    pub system_program: Program<'info, System>,
+}
+
+#[init_computation_definition_accounts("check_threshold", payer)]
+#[derive(Accounts)]
+pub struct InitCheckThresholdCompDef<'info> {
+    #[account(mut)] pub payer: Signer<'info>,
+    #[account(mut, address = derive_mxe_pda!())] pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut)]
+    /// CHECK: not yet initialized.
+    pub comp_def_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
+    /// CHECK: arcium.
+    pub address_lookup_table: UncheckedAccount<'info>,
+    #[account(address = LUT_PROGRAM_ID)]
+    /// CHECK: LUT.
+    pub lut_program: UncheckedAccount<'info>,
+    pub arcium_program: Program<'info, Arcium>,
+    pub system_program: Program<'info, System>,
+}
+
+#[queue_computation_accounts("update_reputation", payer)]
+#[derive(Accounts)]
+#[instruction(computation_offset: u64)]
+pub struct UpdateReputation<'info> {
+    #[account(mut)] pub payer: Signer<'info>,
+    #[account(init_if_needed, space = 9, payer = payer, seeds = [&SIGN_PDA_SEED], bump, address = derive_sign_pda!())]
+    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
+    #[account(address = derive_mxe_pda!())] pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut, address = derive_mempool_pda!(mxe_account))]
+    /// CHECK: arcium.
+    pub mempool_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_execpool_pda!(mxe_account))]
+    /// CHECK: arcium.
+    pub executing_pool: UncheckedAccount<'info>,
+    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account))]
+    /// CHECK: arcium.
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_UPDATE_REPUTATION))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+    #[account(mut, address = derive_cluster_pda!(mxe_account))]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+    #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
+    pub pool_account: Account<'info, FeePool>,
+    #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
+    pub clock_account: Account<'info, ClockAccount>,
+    pub system_program: Program<'info, System>,
+    pub arcium_program: Program<'info, Arcium>,
+}
+
+#[callback_accounts("update_reputation")]
+#[derive(Accounts)]
+pub struct UpdateReputationCallback<'info> {
+    pub arcium_program: Program<'info, Arcium>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_UPDATE_REPUTATION))]
+    pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Account<'info, MXEAccount>,
+    /// CHECK: arcium.
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_cluster_pda!(mxe_account))]
+    pub cluster_account: Account<'info, Cluster>,
+    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
+    /// CHECK: sysvar.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+}
+
+#[queue_computation_accounts("check_threshold", payer)]
+#[derive(Accounts)]
+#[instruction(computation_offset: u64)]
+pub struct CheckThreshold<'info> {
+    #[account(mut)] pub payer: Signer<'info>,
+    #[account(init_if_needed, space = 9, payer = payer, seeds = [&SIGN_PDA_SEED], bump, address = derive_sign_pda!())]
+    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
+    #[account(address = derive_mxe_pda!())] pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut, address = derive_mempool_pda!(mxe_account))]
+    /// CHECK: arcium.
+    pub mempool_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_execpool_pda!(mxe_account))]
+    /// CHECK: arcium.
+    pub executing_pool: UncheckedAccount<'info>,
+    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account))]
+    /// CHECK: arcium.
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_CHECK_THRESHOLD))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+    #[account(mut, address = derive_cluster_pda!(mxe_account))]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+    #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
+    pub pool_account: Account<'info, FeePool>,
+    #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
+    pub clock_account: Account<'info, ClockAccount>,
+    pub system_program: Program<'info, System>,
+    pub arcium_program: Program<'info, Arcium>,
+}
+
+#[callback_accounts("check_threshold")]
+#[derive(Accounts)]
+pub struct CheckThresholdCallback<'info> {
+    pub arcium_program: Program<'info, Arcium>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_CHECK_THRESHOLD))]
+    pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Account<'info, MXEAccount>,
+    /// CHECK: arcium.
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_cluster_pda!(mxe_account))]
+    pub cluster_account: Account<'info, Cluster>,
+    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
+    /// CHECK: sysvar.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+}
+
 #[event] pub struct SupplyRegisteredEvent { pub result:  [u8; 32], pub nonce: [u8; 16] }
 #[event] pub struct SupplyMatchedEvent    { pub matched: [u8; 32], pub score: [u8; 32], pub nonce: [u8; 16] }
 #[event] pub struct CarbonMatchedEvent    { pub result:  [u8; 32], pub nonce: [u8; 16] }
+#[event] pub struct ReputationUpdatedEvent { pub completed_trades: [u8; 32], pub disputes_lost: [u8; 32], pub score: [u8; 32], pub nonce: [u8; 16] }
+#[event] pub struct ThresholdCheckedEvent  { pub passes: [u8; 32], pub nonce: [u8; 16] }
 
 #[error_code]
 pub enum ErrorCode {
