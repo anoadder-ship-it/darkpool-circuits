@@ -951,7 +951,7 @@ pub struct CheckThresholdCallback<'info> {
     pub instructions_sysvar: UncheckedAccount<'info>,
 }
 
-pub const ORDER_BOOK_CT_LEN: usize = 6001;
+pub const ORDER_BOOK_CT_LEN: usize = 37001; // 1000 orders x 37 ciphertext-elementen/order (empirisch bevestigd via place_order.ts) + 1 voor count
 
 #[account]
 pub struct OrderBookState {
