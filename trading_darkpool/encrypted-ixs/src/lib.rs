@@ -4,7 +4,7 @@ use arcis::*;
 mod circuits {
     use arcis::*;
 
-    const ORDER_BOOK_SIZE: usize = 25;
+    const ORDER_BOOK_SIZE: usize = 1000;
 
     #[derive(Clone, Copy)]
     pub struct Order {
@@ -12,7 +12,6 @@ mod circuits {
         pub bid:      u64,
         pub size:     u64,
         pub is_buy:   bool,
-        pub owner:    [u8; 32],
         pub active:   bool,
     }
 
@@ -26,13 +25,10 @@ mod circuits {
         pub bid:      u64,
         pub size:     u64,
         pub is_buy:   bool,
-        pub owner:    [u8; 32],
     }
 
     pub struct MatchResult {
         pub asset_id:      u64,
-        pub buy_owner:     [u8; 32],
-        pub sell_owner:    [u8; 32],
         pub matched_size:  u64,
         pub matched_price: u64,
         pub matched:       bool,
@@ -51,7 +47,6 @@ mod circuits {
             bid:      0,
             size:     0,
             is_buy:   false,
-            owner:    [0u8; 32],
             active:   false,
         };
         let book = OrderBook {
@@ -65,10 +60,11 @@ mod circuits {
     pub fn place_order(
         book_ctxt:  Enc<Mxe, OrderBook>,
         order_ctxt: Enc<Shared, NewOrder>,
-    ) -> Enc<Mxe, OrderBook> {
+    ) -> (Enc<Mxe, OrderBook>, u64) {
         let mut book    = book_ctxt.to_arcis();
         let new_order   = order_ctxt.to_arcis();
         let mut placed  = false;
+        let mut placed_index: u64 = ORDER_BOOK_SIZE as u64;
 
         for i in 0..ORDER_BOOK_SIZE {
             if !book.orders[i].active && !placed {
@@ -76,49 +72,49 @@ mod circuits {
                 book.orders[i].bid      = new_order.bid;
                 book.orders[i].size     = new_order.size;
                 book.orders[i].is_buy   = new_order.is_buy;
-                book.orders[i].owner    = new_order.owner;
                 book.orders[i].active   = true;
                 book.count += 1;
                 placed = true;
+                placed_index = i as u64;
             }
         }
 
-        Mxe::get().from_arcis(book)
+        (Mxe::get().from_arcis(book), placed_index.reveal())
     }
 
     #[instruction]
     pub fn match_orders(
         book_ctxt:  Enc<Mxe, OrderBook>,
         asset_ctxt: Enc<Shared, u64>,
-    ) -> Enc<Shared, MatchResult> {
+    ) -> (Enc<Shared, MatchResult>, u64, u64) {
         let book         = book_ctxt.to_arcis();
         let target_asset = asset_ctxt.to_arcis();
 
-        let mut has_buy   = false;
-        let mut buy_bid:   u64      = 0;
-        let mut buy_size:  u64      = 0;
-        let mut buy_owner: [u8; 32] = [0u8; 32];
+        let mut has_buy    = false;
+        let mut buy_bid:   u64 = 0;
+        let mut buy_size:  u64 = 0;
+        let mut buy_idx:   u64 = ORDER_BOOK_SIZE as u64;
 
         let mut has_sell   = false;
-        let mut sell_bid:   u64      = 0;
-        let mut sell_size:  u64      = 0;
-        let mut sell_owner: [u8; 32] = [0u8; 32];
+        let mut sell_bid:  u64 = 0;
+        let mut sell_size: u64 = 0;
+        let mut sell_idx:  u64 = ORDER_BOOK_SIZE as u64;
 
         for i in 0..ORDER_BOOK_SIZE {
             if book.orders[i].active && book.orders[i].asset_id == target_asset {
                 if book.orders[i].is_buy {
                     if !has_buy || book.orders[i].bid > buy_bid {
-                        has_buy   = true;
-                        buy_bid   = book.orders[i].bid;
-                        buy_size  = book.orders[i].size;
-                        buy_owner = book.orders[i].owner;
+                        has_buy  = true;
+                        buy_bid  = book.orders[i].bid;
+                        buy_size = book.orders[i].size;
+                        buy_idx  = i as u64;
                     }
                 } else {
                     if !has_sell || book.orders[i].bid < sell_bid {
-                        has_sell   = true;
-                        sell_bid   = book.orders[i].bid;
-                        sell_size  = book.orders[i].size;
-                        sell_owner = book.orders[i].owner;
+                        has_sell  = true;
+                        sell_bid  = book.orders[i].bid;
+                        sell_size = book.orders[i].size;
+                        sell_idx  = i as u64;
                     }
                 }
             }
@@ -126,62 +122,39 @@ mod circuits {
 
         let mut result = MatchResult {
             asset_id:      target_asset,
-            buy_owner:     [0u8; 32],
-            sell_owner:    [0u8; 32],
             matched_size:  0,
             matched_price: 0,
             matched:       false,
         };
+        let mut out_buy_idx  = ORDER_BOOK_SIZE as u64;
+        let mut out_sell_idx = ORDER_BOOK_SIZE as u64;
 
         if has_buy && has_sell && buy_bid >= sell_bid {
-            result.buy_owner     = buy_owner;
-            result.sell_owner    = sell_owner;
             result.matched_size  = if buy_size < sell_size { buy_size } else { sell_size };
             result.matched_price = (buy_bid + sell_bid) / 2;
             result.matched        = true;
+            out_buy_idx  = buy_idx;
+            out_sell_idx = sell_idx;
         }
 
-        asset_ctxt.owner.from_arcis(result)
+        (asset_ctxt.owner.from_arcis(result), out_buy_idx.reveal(), out_sell_idx.reveal())
     }
 
     #[instruction]
     pub fn settle_match(
-        book_ctxt:  Enc<Mxe, OrderBook>,
-        asset_ctxt: Enc<Shared, u64>,
+        book_ctxt: Enc<Mxe, OrderBook>,
+        buy_idx:   u64,
+        sell_idx:  u64,
     ) -> Enc<Mxe, OrderBook> {
-        let mut book     = book_ctxt.to_arcis();
-        let target_asset = asset_ctxt.to_arcis();
-
-        let mut best_buy_idx:  i64 = -1;
-        let mut best_buy_bid:  u64 = 0;
-        let mut best_sell_idx: i64 = -1;
-        let mut best_sell_bid: u64 = 0;
+        let mut book = book_ctxt.to_arcis();
 
         for i in 0..ORDER_BOOK_SIZE {
-            if book.orders[i].active && book.orders[i].asset_id == target_asset {
-                if book.orders[i].is_buy {
-                    if best_buy_idx == -1 || book.orders[i].bid > best_buy_bid {
-                        best_buy_idx = i as i64;
-                        best_buy_bid = book.orders[i].bid;
-                    }
-                } else {
-                    if best_sell_idx == -1 || book.orders[i].bid < best_sell_bid {
-                        best_sell_idx = i as i64;
-                        best_sell_bid = book.orders[i].bid;
-                    }
-                }
-            }
-        }
-
-        if best_buy_idx != -1 && best_sell_idx != -1 && best_buy_bid >= best_sell_bid {
-            for i in 0..ORDER_BOOK_SIZE {
-                if (i as i64) == best_buy_idx || (i as i64) == best_sell_idx {
-                    book.orders[i].active = false;
-                    book.orders[i].bid    = 0;
-                    book.orders[i].size   = 0;
-                    if book.count > 0 {
-                        book.count -= 1;
-                    }
+            if (i as u64) == buy_idx || (i as u64) == sell_idx {
+                book.orders[i].active = false;
+                book.orders[i].bid    = 0;
+                book.orders[i].size   = 0;
+                if book.count > 0 {
+                    book.count -= 1;
                 }
             }
         }
@@ -190,29 +163,20 @@ mod circuits {
     }
 
     #[instruction]
-    pub fn cancel_order(
-        book_ctxt:  Enc<Mxe, OrderBook>,
-        owner_ctxt: Enc<Shared, [u8; 32]>,
-        asset_ctxt: Enc<Shared, u64>,
+    pub fn cancel_trade_order(
+        book_ctxt: Enc<Mxe, OrderBook>,
+        index:     u64,
     ) -> Enc<Mxe, OrderBook> {
-        let mut book      = book_ctxt.to_arcis();
-        let     owner     = owner_ctxt.to_arcis();
-        let     asset_id  = asset_ctxt.to_arcis();
-        let mut cancelled = false;
+        let mut book = book_ctxt.to_arcis();
 
         for i in 0..ORDER_BOOK_SIZE {
-            if book.orders[i].active
-                && book.orders[i].owner == owner
-                && book.orders[i].asset_id == asset_id
-                && !cancelled
-            {
+            if (i as u64) == index {
                 book.orders[i].active = false;
                 book.orders[i].bid    = 0;
                 book.orders[i].size   = 0;
                 if book.count > 0 {
                     book.count -= 1;
                 }
-                cancelled = true;
             }
         }
 
