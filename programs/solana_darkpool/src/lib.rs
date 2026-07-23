@@ -5,7 +5,8 @@ use arcium_client::idl::arcium::types::{OffChainCircuitSource, CircuitSource, Ca
 
 const COMP_DEF_OFFSET_PLACE_ORDER:  u32 = comp_def_offset("place_order");
 const COMP_DEF_OFFSET_MATCH_ORDERS: u32 = comp_def_offset("match_orders");
-const COMP_DEF_OFFSET_CANCEL_ORDER: u32 = comp_def_offset("cancel_order");
+const COMP_DEF_OFFSET_CANCEL_ORDER: u32 = comp_def_offset("cancel_trade_order");
+const COMP_DEF_OFFSET_SETTLE_MATCH: u32 = comp_def_offset("settle_match");
 const COMP_DEF_OFFSET_GET_STATS:    u32 = comp_def_offset("get_stats");
 const COMP_DEF_OFFSET_INIT_ORDER_BOOK: u32 = comp_def_offset("init_order_book");
 const COMP_DEF_OFFSET_UPDATE_REPUTATION: u32 = comp_def_offset("update_reputation");
@@ -62,10 +63,12 @@ pub struct InitializePool<'info> {
 }
 
 
-const PLACE_ORDER_URL:  &str = "https://github.com/anoadder-ship-it/darkpool-circuits/releases/download/v0.11.4/place_order.arcis";
-const MATCH_ORDERS_URL: &str = "https://github.com/anoadder-ship-it/darkpool-circuits/releases/download/v0.11.4/match_orders.arcis";
-const CANCEL_ORDER_URL: &str = "https://github.com/anoadder-ship-it/darkpool-circuits/releases/download/v0.11.4/cancel_order.arcis";
-const GET_STATS_URL:    &str = "https://github.com/anoadder-ship-it/darkpool-circuits/releases/download/v0.11.4/get_stats.arcis";
+const PLACE_ORDER_URL: &str = "https://github.com/anoadder-ship-it/darkpool-circuits/releases/download/v0.12.0/place_order.arcis";
+const MATCH_ORDERS_URL: &str = "https://github.com/anoadder-ship-it/darkpool-circuits/releases/download/v0.12.0/match_orders.arcis";
+const CANCEL_ORDER_URL: &str = "https://github.com/anoadder-ship-it/darkpool-circuits/releases/download/v0.12.0/cancel_trade_order.arcis";
+const SETTLE_MATCH_URL: &str = "https://github.com/anoadder-ship-it/darkpool-circuits/releases/download/v0.12.0/settle_match.arcis";
+const INIT_ORDER_BOOK_V2_URL: &str = "https://github.com/anoadder-ship-it/darkpool-circuits/releases/download/v0.12.0/init_order_book.arcis";
+const GET_STATS_URL: &str = "https://github.com/anoadder-ship-it/darkpool-circuits/releases/download/v0.12.0/get_stats.arcis";
 const INIT_ORDER_BOOK_URL: &str = "https://github.com/anoadder-ship-it/darkpool-circuits/releases/download/v0.12.0/init_order_book.arcis";
 const UPDATE_REPUTATION_URL: &str = "https://github.com/anoadder-ship-it/darkpool-circuits/releases/download/v0.11.5/update_reputation.arcis";
 const CHECK_THRESHOLD_URL:   &str = "https://github.com/anoadder-ship-it/darkpool-circuits/releases/download/v0.11.5/check_threshold.arcis";
@@ -90,10 +93,10 @@ pub mod solana_darkpool {
         Ok(())
     }
 
-    pub fn init_cancel_order_comp_def(ctx: Context<InitCancelOrderCompDef>) -> Result<()> {
+    pub fn init_cancel_order_comp_def(ctx: Context<InitCancelTradeOrderCompDef>) -> Result<()> {
         init_computation_def(ctx.accounts, Some(CircuitSource::OffChain(OffChainCircuitSource {
             source: CANCEL_ORDER_URL.to_string(),
-            hash: circuit_hash!("cancel_order"),
+            hash: circuit_hash!("cancel_trade_order"),
         })))?;
         Ok(())
     }
@@ -109,26 +112,38 @@ pub mod solana_darkpool {
     pub fn place_order(
         ctx: Context<PlaceOrder>,
         computation_offset: u64,
-        encrypted_bid:    [u8; 32],
-        encrypted_size:   [u8; 32],
-        encrypted_is_buy: [u8; 32],
+        enc_asset_id: [u8; 32],
+        enc_bid:      [u8; 32],
+        enc_size:     [u8; 32],
+        enc_is_buy:   [u8; 32],
         pubkey: [u8; 32],
         nonce:  u128,
     ) -> Result<()> {
         require!(ctx.accounts.moeras_pool.status == PoolStatus::Active, ErrorCode::MoerasModeActive);
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
         let args = ArgBuilder::new()
+            .account(ctx.accounts.order_book_state.key(), 8, (ORDER_BOOK_CT_LEN * 32) as u32)
             .x25519_pubkey(pubkey)
             .plaintext_u128(nonce)
-            .encrypted_u64(encrypted_bid)
-            .encrypted_u64(encrypted_size)
-            .encrypted_u64(encrypted_is_buy)
+            .encrypted_u64(enc_asset_id)
+            .encrypted_u64(enc_bid)
+            .encrypted_u64(enc_size)
+            .encrypted_u64(enc_is_buy)
             .build();
-        queue_computation(
-            ctx.accounts, computation_offset, args,
-            vec![PlaceOrderCallback::callback_ix(computation_offset, &ctx.accounts.mxe_account, &[])?],
-            1, 0, 0,
-        )?;
+        let callback_ix = CallbackInstruction {
+            program_id: ID_CONST,
+            discriminator: instruction::PlaceOrderCallback::DISCRIMINATOR.to_vec(),
+            accounts: vec![
+                CallbackAccount { pubkey: ctx.accounts.arcium_program.key(), is_writable: false },
+                CallbackAccount { pubkey: derive_comp_def_pda!(COMP_DEF_OFFSET_PLACE_ORDER), is_writable: false },
+                CallbackAccount { pubkey: derive_mxe_pda!(), is_writable: false },
+                CallbackAccount { pubkey: derive_cluster_pda!(ctx.accounts.mxe_account), is_writable: false },
+                CallbackAccount { pubkey: ::arcium_anchor::solana_instructions_sysvar::ID, is_writable: false },
+                CallbackAccount { pubkey: ctx.accounts.order_book_state.key(), is_writable: true },
+                CallbackAccount { pubkey: ctx.accounts.payer.key(), is_writable: false },
+            ],
+        };
+        queue_computation(ctx.accounts, computation_offset, args, vec![callback_ix], 1, 0, 0)?;
         Ok(())
     }
 
@@ -138,28 +153,40 @@ pub mod solana_darkpool {
         output: SignedComputationOutputs<PlaceOrderOutput>,
     ) -> Result<()> {
         let o = match output.verify_output(&ctx.accounts.cluster_account, &ctx.accounts.computation_account) {
-            Ok(PlaceOrderOutput { field_0 }) => field_0,
+            Ok(PlaceOrderOutput { field_0 }) => (field_0.field_0, field_0.field_1),
             Err(_) => return Err(ErrorCode::AbortedComputation.into()),
         };
-        emit!(OrderPlacedEvent { result: o.ciphertexts[0], nonce: o.nonce.to_le_bytes() });
+        let (book, placed_index) = o;
+        {
+            let data = ctx.accounts.order_book_state.to_account_info();
+            let mut bytes = data.try_borrow_mut_data()?;
+            for (i, ct) in book.ciphertexts.iter().enumerate() {
+                let start = 8 + i * 32;
+                bytes[start..start + 32].copy_from_slice(ct);
+            }
+            if placed_index < ORDER_BOOK_MAX_ORDERS as u64 {
+                let owners_start = 8 + ORDER_BOOK_CT_LEN * 32 + (placed_index as usize) * 32;
+                bytes[owners_start..owners_start + 32].copy_from_slice(&ctx.accounts.owner.key().to_bytes());
+            }
+        }
+        emit!(OrderPlacedEvent { placed_index, nonce: book.nonce.to_le_bytes() });
         Ok(())
     }
 
     pub fn match_orders(
         ctx: Context<MatchOrders>,
         computation_offset: u64,
-        encrypted_buy_bid:  [u8; 32],
-        encrypted_sell_bid: [u8; 32],
+        enc_asset_id: [u8; 32],
         pubkey: [u8; 32],
         nonce:  u128,
     ) -> Result<()> {
         require!(ctx.accounts.moeras_pool.status == PoolStatus::Active, ErrorCode::MoerasModeActive);
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
         let args = ArgBuilder::new()
+            .account(ctx.accounts.order_book_state.key(), 8, (ORDER_BOOK_CT_LEN * 32) as u32)
             .x25519_pubkey(pubkey)
             .plaintext_u128(nonce)
-            .encrypted_u64(encrypted_buy_bid)
-            .encrypted_u64(encrypted_sell_bid)
+            .encrypted_u64(enc_asset_id)
             .build();
         queue_computation(
             ctx.accounts, computation_offset, args,
@@ -175,45 +202,113 @@ pub mod solana_darkpool {
         output: SignedComputationOutputs<MatchOrdersOutput>,
     ) -> Result<()> {
         let o = match output.verify_output(&ctx.accounts.cluster_account, &ctx.accounts.computation_account) {
-            Ok(MatchOrdersOutput { field_0 }) => field_0,
+            Ok(MatchOrdersOutput { field_0 }) => (field_0.field_0, field_0.field_1, field_0.field_2),
             Err(_) => return Err(ErrorCode::AbortedComputation.into()),
         };
-        emit!(MatchEvent { result: o.ciphertexts[0], nonce: o.nonce.to_le_bytes() });
+        let (result, buy_idx, sell_idx) = o;
+        emit!(MatchEvent {
+            result: result.ciphertexts[0],
+            nonce: result.nonce.to_le_bytes(),
+            buy_idx,
+            sell_idx,
+        });
         Ok(())
     }
 
-    pub fn cancel_order(
-        ctx: Context<CancelOrder>,
+    pub fn settle_match(
+        ctx: Context<SettleMatch>,
         computation_offset: u64,
-        encrypted_order_id: [u8; 32],
-        pubkey: [u8; 32],
-        nonce:  u128,
+        buy_idx:  u64,
+        sell_idx: u64,
     ) -> Result<()> {
         require!(ctx.accounts.moeras_pool.status == PoolStatus::Active, ErrorCode::MoerasModeActive);
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
         let args = ArgBuilder::new()
-            .x25519_pubkey(pubkey)
-            .plaintext_u128(nonce)
-            .encrypted_u64(encrypted_order_id)
+            .account(ctx.accounts.order_book_state.key(), 8, (ORDER_BOOK_CT_LEN * 32) as u32)
+            .plaintext_u64(buy_idx)
+            .plaintext_u64(sell_idx)
             .build();
-        queue_computation(
-            ctx.accounts, computation_offset, args,
-            vec![CancelOrderCallback::callback_ix(computation_offset, &ctx.accounts.mxe_account, &[])?],
-            1, 0, 0,
-        )?;
+        let callback_ix = CallbackInstruction {
+            program_id: ID_CONST,
+            discriminator: instruction::SettleMatchCallback::DISCRIMINATOR.to_vec(),
+            accounts: vec![
+                CallbackAccount { pubkey: ctx.accounts.arcium_program.key(), is_writable: false },
+                CallbackAccount { pubkey: derive_comp_def_pda!(COMP_DEF_OFFSET_SETTLE_MATCH), is_writable: false },
+                CallbackAccount { pubkey: derive_mxe_pda!(), is_writable: false },
+                CallbackAccount { pubkey: derive_cluster_pda!(ctx.accounts.mxe_account), is_writable: false },
+                CallbackAccount { pubkey: ::arcium_anchor::solana_instructions_sysvar::ID, is_writable: false },
+                CallbackAccount { pubkey: ctx.accounts.order_book_state.key(), is_writable: true },
+            ],
+        };
+        queue_computation(ctx.accounts, computation_offset, args, vec![callback_ix], 1, 0, 0)?;
         Ok(())
     }
 
-    #[arcium_callback(encrypted_ix = "cancel_order")]
-    pub fn cancel_order_callback(
-        ctx: Context<CancelOrderCallback>,
-        output: SignedComputationOutputs<CancelOrderOutput>,
+    #[arcium_callback(encrypted_ix = "settle_match")]
+    pub fn settle_match_callback(
+        ctx: Context<SettleMatchCallback>,
+        output: SignedComputationOutputs<SettleMatchOutput>,
     ) -> Result<()> {
         let o = match output.verify_output(&ctx.accounts.cluster_account, &ctx.accounts.computation_account) {
-            Ok(CancelOrderOutput { field_0 }) => field_0,
+            Ok(SettleMatchOutput { field_0 }) => field_0,
             Err(_) => return Err(ErrorCode::AbortedComputation.into()),
         };
-        emit!(OrderCancelledEvent { result: o.ciphertexts[0], nonce: o.nonce.to_le_bytes() });
+        let data = ctx.accounts.order_book_state.to_account_info();
+        let mut bytes = data.try_borrow_mut_data()?;
+        for (i, ct) in o.ciphertexts.iter().enumerate() {
+            let start = 8 + i * 32;
+            bytes[start..start + 32].copy_from_slice(ct);
+        }
+        Ok(())
+    }
+
+    pub fn cancel_trade_order(
+        ctx: Context<CancelTradeOrder>,
+        computation_offset: u64,
+        index: u64,
+    ) -> Result<()> {
+        require!(ctx.accounts.moeras_pool.status == PoolStatus::Active, ErrorCode::MoerasModeActive);
+        require!(index < ORDER_BOOK_MAX_ORDERS as u64, ErrorCode::InvalidOrderIndex);
+        require!(
+            ctx.accounts.order_book_state.owners[index as usize] == ctx.accounts.payer.key(),
+            ErrorCode::NotOrderOwner
+        );
+        ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+        let args = ArgBuilder::new()
+            .account(ctx.accounts.order_book_state.key(), 8, (ORDER_BOOK_CT_LEN * 32) as u32)
+            .plaintext_u64(index)
+            .build();
+        let callback_ix = CallbackInstruction {
+            program_id: ID_CONST,
+            discriminator: instruction::CancelTradeOrderCallback::DISCRIMINATOR.to_vec(),
+            accounts: vec![
+                CallbackAccount { pubkey: ctx.accounts.arcium_program.key(), is_writable: false },
+                CallbackAccount { pubkey: derive_comp_def_pda!(COMP_DEF_OFFSET_CANCEL_ORDER), is_writable: false },
+                CallbackAccount { pubkey: derive_mxe_pda!(), is_writable: false },
+                CallbackAccount { pubkey: derive_cluster_pda!(ctx.accounts.mxe_account), is_writable: false },
+                CallbackAccount { pubkey: ::arcium_anchor::solana_instructions_sysvar::ID, is_writable: false },
+                CallbackAccount { pubkey: ctx.accounts.order_book_state.key(), is_writable: true },
+            ],
+        };
+        queue_computation(ctx.accounts, computation_offset, args, vec![callback_ix], 1, 0, 0)?;
+        Ok(())
+    }
+
+    #[arcium_callback(encrypted_ix = "cancel_trade_order")]
+    pub fn cancel_trade_order_callback(
+        ctx: Context<CancelTradeOrderCallback>,
+        output: SignedComputationOutputs<CancelTradeOrderOutput>,
+    ) -> Result<()> {
+        let o = match output.verify_output(&ctx.accounts.cluster_account, &ctx.accounts.computation_account) {
+            Ok(CancelTradeOrderOutput { field_0 }) => field_0,
+            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+        };
+        let data = ctx.accounts.order_book_state.to_account_info();
+        let mut bytes = data.try_borrow_mut_data()?;
+        for (i, ct) in o.ciphertexts.iter().enumerate() {
+            let start = 8 + i * 32;
+            bytes[start..start + 32].copy_from_slice(ct);
+        }
         Ok(())
     }
 
@@ -255,17 +350,14 @@ pub mod solana_darkpool {
     pub fn get_stats(
         ctx: Context<GetStats>,
         computation_offset: u64,
-        encrypted_buy_vol:  [u8; 32],
-        encrypted_sell_vol: [u8; 32],
         pubkey: [u8; 32],
         nonce:  u128,
     ) -> Result<()> {
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
         let args = ArgBuilder::new()
+            .account(ctx.accounts.order_book_state.key(), 8, (ORDER_BOOK_CT_LEN * 32) as u32)
             .x25519_pubkey(pubkey)
             .plaintext_u128(nonce)
-            .encrypted_u64(encrypted_buy_vol)
-            .encrypted_u64(encrypted_sell_vol)
             .build();
         queue_computation(
             ctx.accounts, computation_offset, args,
@@ -295,6 +387,14 @@ pub mod solana_darkpool {
     // Squads-multisig (vault-PDA) via resolve_dispute. Zonder dispute
     // binnen de termijn mag de verkoper zelf claimen.
     // ============================================================
+
+    pub fn init_settle_match_comp_def(ctx: Context<InitSettleMatchCompDef>) -> Result<()> {
+        init_computation_def(ctx.accounts, Some(CircuitSource::OffChain(OffChainCircuitSource {
+            source: SETTLE_MATCH_URL.to_string(),
+            hash: circuit_hash!("settle_match"),
+        })))?;
+        Ok(())
+    }
 
     pub fn init_update_reputation_comp_def(ctx: Context<InitUpdateReputationCompDef>) -> Result<()> {
         init_computation_def(ctx.accounts, Some(CircuitSource::OffChain(OffChainCircuitSource {
@@ -576,6 +676,8 @@ pub struct PlaceOrder<'info> {
     pub pool_account: Account<'info, FeePool>,
     #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
     pub clock_account: Account<'info, ClockAccount>,
+    #[account(mut, seeds = [b"order_book"], bump)]
+    pub order_book_state: Box<Account<'info, OrderBookState>>,
     pub system_program: Program<'info, System>,
     pub arcium_program: Program<'info, Arcium>,
 }
@@ -595,6 +697,10 @@ pub struct PlaceOrderCallback<'info> {
     #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
     /// CHECK: sysvar.
     pub instructions_sysvar: UncheckedAccount<'info>,
+    #[account(mut, seeds = [b"order_book"], bump)]
+    pub order_book_state: Box<Account<'info, OrderBookState>>,
+    /// CHECK: alleen public key nodig, om eigenaarschap te registreren.
+    pub owner: UncheckedAccount<'info>,
 }
 
 #[init_computation_definition_accounts("place_order", payer)]
@@ -645,6 +751,8 @@ pub struct MatchOrders<'info> {
     pub pool_account: Account<'info, FeePool>,
     #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
     pub clock_account: Account<'info, ClockAccount>,
+    #[account(seeds = [b"order_book"], bump)]
+    pub order_book_state: Box<Account<'info, OrderBookState>>,
     pub system_program: Program<'info, System>,
     pub arcium_program: Program<'info, Arcium>,
 }
@@ -686,10 +794,10 @@ pub struct InitMatchOrdersCompDef<'info> {
     pub system_program: Program<'info, System>,
 }
 
-#[queue_computation_accounts("cancel_order", payer)]
+#[queue_computation_accounts("cancel_trade_order", payer)]
 #[derive(Accounts)]
 #[instruction(computation_offset: u64)]
-pub struct CancelOrder<'info> {
+pub struct CancelTradeOrder<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     #[account(init_if_needed, space = 9, payer = payer, seeds = [&SIGN_PDA_SEED], bump, address = derive_sign_pda!())]
@@ -714,13 +822,15 @@ pub struct CancelOrder<'info> {
     pub pool_account: Account<'info, FeePool>,
     #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
     pub clock_account: Account<'info, ClockAccount>,
+    #[account(mut, seeds = [b"order_book"], bump)]
+    pub order_book_state: Box<Account<'info, OrderBookState>>,
     pub system_program: Program<'info, System>,
     pub arcium_program: Program<'info, Arcium>,
 }
 
-#[callback_accounts("cancel_order")]
+#[callback_accounts("cancel_trade_order")]
 #[derive(Accounts)]
-pub struct CancelOrderCallback<'info> {
+pub struct CancelTradeOrderCallback<'info> {
     pub arcium_program: Program<'info, Arcium>,
     #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_CANCEL_ORDER))]
     pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
@@ -733,11 +843,86 @@ pub struct CancelOrderCallback<'info> {
     #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
     /// CHECK: sysvar.
     pub instructions_sysvar: UncheckedAccount<'info>,
+    #[account(mut, seeds = [b"order_book"], bump)]
+    pub order_book_state: Box<Account<'info, OrderBookState>>,
 }
 
-#[init_computation_definition_accounts("cancel_order", payer)]
+#[init_computation_definition_accounts("cancel_trade_order", payer)]
 #[derive(Accounts)]
-pub struct InitCancelOrderCompDef<'info> {
+pub struct InitCancelTradeOrderCompDef<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(mut, address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut)]
+    /// CHECK: not initialized yet.
+    pub comp_def_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
+    /// CHECK: arcium.
+    pub address_lookup_table: UncheckedAccount<'info>,
+    #[account(address = LUT_PROGRAM_ID)]
+    /// CHECK: LUT.
+    pub lut_program: UncheckedAccount<'info>,
+    pub arcium_program: Program<'info, Arcium>,
+    pub system_program: Program<'info, System>,
+}
+
+#[queue_computation_accounts("settle_match", payer)]
+#[derive(Accounts)]
+#[instruction(computation_offset: u64)]
+pub struct SettleMatch<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(init_if_needed, space = 9, payer = payer, seeds = [&SIGN_PDA_SEED], bump, address = derive_sign_pda!())]
+    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut, address = derive_mempool_pda!(mxe_account))]
+    /// CHECK: arcium.
+    pub mempool_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_execpool_pda!(mxe_account))]
+    /// CHECK: arcium.
+    pub executing_pool: UncheckedAccount<'info>,
+    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account))]
+    /// CHECK: arcium.
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_SETTLE_MATCH))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+    pub moeras_pool: Account<'info, PoolState>,
+    #[account(mut, address = derive_cluster_pda!(mxe_account))]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+    #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
+    pub pool_account: Account<'info, FeePool>,
+    #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
+    pub clock_account: Account<'info, ClockAccount>,
+    #[account(mut, seeds = [b"order_book"], bump)]
+    pub order_book_state: Box<Account<'info, OrderBookState>>,
+    pub system_program: Program<'info, System>,
+    pub arcium_program: Program<'info, Arcium>,
+}
+
+#[callback_accounts("settle_match")]
+#[derive(Accounts)]
+pub struct SettleMatchCallback<'info> {
+    pub arcium_program: Program<'info, Arcium>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_SETTLE_MATCH))]
+    pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Account<'info, MXEAccount>,
+    /// CHECK: arcium.
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_cluster_pda!(mxe_account))]
+    pub cluster_account: Account<'info, Cluster>,
+    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
+    /// CHECK: sysvar.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+    #[account(mut, seeds = [b"order_book"], bump)]
+    pub order_book_state: Box<Account<'info, OrderBookState>>,
+}
+
+#[init_computation_definition_accounts("settle_match", payer)]
+#[derive(Accounts)]
+pub struct InitSettleMatchCompDef<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     #[account(mut, address = derive_mxe_pda!())]
@@ -782,6 +967,8 @@ pub struct GetStats<'info> {
     pub pool_account: Account<'info, FeePool>,
     #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
     pub clock_account: Account<'info, ClockAccount>,
+    #[account(seeds = [b"order_book"], bump)]
+    pub order_book_state: Box<Account<'info, OrderBookState>>,
     pub system_program: Program<'info, System>,
     pub arcium_program: Program<'info, Arcium>,
 }
@@ -951,14 +1138,16 @@ pub struct CheckThresholdCallback<'info> {
     pub instructions_sysvar: UncheckedAccount<'info>,
 }
 
-pub const ORDER_BOOK_CT_LEN: usize = 37001; // 1000 orders x 37 ciphertext-elementen/order (empirisch bevestigd via place_order.ts) + 1 voor count
+pub const ORDER_BOOK_CT_LEN: usize = 5001; // 1000 orders x 5 ciphertext-elementen/order (empirisch herbevestigd na herontwerp: owner niet meer versleuteld) + 1 voor count
+pub const ORDER_BOOK_MAX_ORDERS: usize = 1000;
 
 #[account]
 pub struct OrderBookState {
     pub ciphertexts: [[u8; 32]; ORDER_BOOK_CT_LEN],
+    pub owners: [Pubkey; ORDER_BOOK_MAX_ORDERS], // plaintext, parallel geindexeerd -- eigenaarschap is niet gevoelig
 }
 impl OrderBookState {
-    pub const SPACE: usize = 8 + ORDER_BOOK_CT_LEN * 32;
+    pub const SPACE: usize = 8 + ORDER_BOOK_CT_LEN * 32 + ORDER_BOOK_MAX_ORDERS * 32;
 }
 
 #[init_computation_definition_accounts("init_order_book", payer)]
@@ -1029,8 +1218,8 @@ pub struct InitOrderBookCallback<'info> {
     pub order_book_state: Box<Account<'info, OrderBookState>>,
 }
 
-#[event] pub struct OrderPlacedEvent    { pub result: [u8; 32], pub nonce: [u8; 16] }
-#[event] pub struct MatchEvent          { pub result: [u8; 32], pub nonce: [u8; 16] }
+#[event] pub struct OrderPlacedEvent    { pub placed_index: u64, pub nonce: [u8; 16] }
+#[event] pub struct MatchEvent          { pub result: [u8; 32], pub nonce: [u8; 16], pub buy_idx: u64, pub sell_idx: u64 }
 #[event] pub struct OrderCancelledEvent { pub result: [u8; 32], pub nonce: [u8; 16] }
 #[event] pub struct StatsEvent          { pub result: [u8; 32], pub nonce: [u8; 16] }
 #[event] pub struct ReputationUpdatedEvent { pub completed_trades: [u8; 32], pub disputes_lost: [u8; 32], pub score: [u8; 32], pub nonce: [u8; 16] }
@@ -1038,6 +1227,10 @@ pub struct InitOrderBookCallback<'info> {
 
 #[error_code]
 pub enum ErrorCode {
+    #[msg("Order-index buiten bereik.")]
+    InvalidOrderIndex,
+    #[msg("Dit order is niet van jou.")]
+    NotOrderOwner,
     #[msg("Onbevoegde aanroep. Alleen de DGX Spark Guardian mag dit doen.")]
     UnauthorizedGuardian,
     #[msg("The computation was aborted")]
