@@ -140,6 +140,10 @@ mod circuits {
         (asset_ctxt.owner.from_arcis(result), out_buy_idx.reveal(), out_sell_idx.reveal())
     }
 
+    /// Partial fill: berekent fill_size = min(buy.size, sell.size),
+    /// trekt dat af van beide orders. Orders met restgrootte 0 worden
+    /// inactief; orders met restgrootte > 0 blijven in het boek staan
+    /// voor toekomstige matches.
     #[instruction]
     pub fn settle_match(
         book_ctxt: Enc<Mxe, OrderBook>,
@@ -148,13 +152,39 @@ mod circuits {
     ) -> Enc<Mxe, OrderBook> {
         let mut book = book_ctxt.to_arcis();
 
+        let mut buy_size: u64 = 0;
+        let mut sell_size: u64 = 0;
+
         for i in 0..ORDER_BOOK_SIZE {
-            if (i as u64) == buy_idx || (i as u64) == sell_idx {
-                book.orders[i].active = false;
-                book.orders[i].bid    = 0;
-                book.orders[i].size   = 0;
-                if book.count > 0 {
-                    book.count -= 1;
+            if (i as u64) == buy_idx {
+                buy_size = book.orders[i].size;
+            }
+            if (i as u64) == sell_idx {
+                sell_size = book.orders[i].size;
+            }
+        }
+
+        let fill_size = if buy_size < sell_size { buy_size } else { sell_size };
+
+        for i in 0..ORDER_BOOK_SIZE {
+            if (i as u64) == buy_idx {
+                book.orders[i].size = book.orders[i].size - fill_size;
+                if book.orders[i].size == 0 {
+                    book.orders[i].active = false;
+                    book.orders[i].bid    = 0;
+                    if book.count > 0 {
+                        book.count -= 1;
+                    }
+                }
+            }
+            if (i as u64) == sell_idx {
+                book.orders[i].size = book.orders[i].size - fill_size;
+                if book.orders[i].size == 0 {
+                    book.orders[i].active = false;
+                    book.orders[i].bid    = 0;
+                    if book.count > 0 {
+                        book.count -= 1;
+                    }
                 }
             }
         }
