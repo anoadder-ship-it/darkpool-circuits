@@ -4,115 +4,248 @@ use arcis::*;
 mod circuits {
     use arcis::*;
 
-    // Chip aanbod van een verkoper
-    pub struct ChipListing {
-        pub chip_type:      u64,  // H100=1001 H200=1002 GB200=1003 A100=1004 MI300X=2001 Gaudi3=3001
-        pub quantity:       u64,  // aantal units
-        pub condition:      u64,  // 1=nieuw 2=refurb 3=gebruikt
-        pub price_per_unit: u64,  // USD cents per chip
-        pub delivery_days:  u64,  // levertijd in dagen
-        pub region:         u64,  // 1=EU 2=US 3=Asia 4=global
-        pub cert_level:     u64,  // 1=datacenter 2=workstation 3=consumer
+    const CHIP_BOOK_SIZE: usize = 500;
+
+    #[derive(Clone, Copy)]
+    pub struct ChipOffer {
+        pub chip_type:  u64,  // categorie (GPU/CPU/ASIC/FPGA/...)
+        pub volume:     u64,  // aantal chips
+        pub unit_price: u64,
+        pub is_supply:  bool, // true = aanbod, false = vraag
+        pub active:     bool,
+        pub expires_at: u64,  // Unix timestamp, 0 = nooit
     }
 
-    // Kooporder van een koper
-    pub struct ChipOrder {
-        pub chip_type:    u64,  // gewenst chiptype
-        pub min_quantity: u64,  // minimum aantal
-        pub max_condition:u64,  // slechtste acceptabele conditie (hoger=soepeler)
-        pub max_price:    u64,  // maximum prijs per chip (cents)
-        pub max_delivery: u64,  // maximum levertijd (dagen)
-        pub req_region:   u64,  // gewenste regio (4=global accepteert alles)
-        pub min_cert:     u64,  // minimum certificatieniveau
+    pub struct ChipBook {
+        pub offers: [ChipOffer; CHIP_BOOK_SIZE],
+        pub count:  u64,
     }
 
-    // Gecombineerde matchrequest (14 velden)
-    pub struct ChipMatchRequest {
-        // Aanbod velden
-        pub chip_type:      u64,
-        pub quantity:       u64,
-        pub condition:      u64,
-        pub price_per_unit: u64,
-        pub delivery_days:  u64,
-        pub list_region:    u64,
-        pub cert_level:     u64,
-        // Aanvraag velden
-        pub req_chip_type:  u64,
-        pub min_quantity:   u64,
-        pub max_condition:  u64,
-        pub max_price:      u64,
-        pub max_delivery:   u64,
-        pub req_region:     u64,
-        pub min_cert:       u64,
+    pub struct NewChipOffer {
+        pub chip_type:  u64,
+        pub volume:     u64,
+        pub unit_price: u64,
+        pub is_supply:  bool,
+        pub expires_at: u64,
     }
 
     pub struct ChipMatchResult {
-        pub matched: u64,  // 1=match 0=geen match
-        pub score:   u64,  // 0-98 (7 criteria x 14 punten)
+        pub chip_type:     u64,
+        pub matched_vol:   u64,
+        pub matched_price: u64,
+        pub matched:       bool,
     }
 
-    /// Registreer een versleuteld chip aanbod
+    pub struct ChipStats {
+        pub total_offers:  u64,
+        pub supply_volume: u64,
+        pub demand_volume: u64,
+    }
+
+    /// Maakt een leeg, versleuteld chip-boek aan (MXE-eigendom).
     #[instruction]
-    pub fn register_chip(listing: Enc<Shared, ChipListing>) -> Enc<Shared, u64> {
-        let _l = listing.to_arcis();
-        listing.owner.from_arcis(1u64)
+    pub fn init_chip_book() -> Enc<Mxe, ChipBook> {
+        let empty = ChipOffer {
+            chip_type:  0,
+            volume:     0,
+            unit_price: 0,
+            is_supply:  false,
+            active:     false,
+            expires_at: 0,
+        };
+        let book = ChipBook {
+            offers: [empty; CHIP_BOOK_SIZE],
+            count:  0,
+        };
+        Mxe::get().from_arcis(book)
     }
 
-    /// Match chip aanbod met kooporder — volledig encrypted
-    /// Zeven criteria: type exact, qty voldoende, conditie ok, prijs ok,
-    ///   levering ok, regio ok, certificering ok
+    /// Registreert een chip-aanbod/vraag en onthult alleen de slot-index.
     #[instruction]
-    pub fn match_chip(request: Enc<Shared, ChipMatchRequest>) -> Enc<Shared, ChipMatchResult> {
-        let r = request.to_arcis();
+    pub fn register_chip(
+        book_ctxt:  Enc<Mxe, ChipBook>,
+        offer_ctxt: Enc<Shared, NewChipOffer>,
+    ) -> (Enc<Mxe, ChipBook>, u64) {
+        let mut book   = book_ctxt.to_arcis();
+        let offer      = offer_ctxt.to_arcis();
+        let mut placed = false;
+        let mut placed_index: u64 = CHIP_BOOK_SIZE as u64;
 
-        // Criterium 1: chiptype moet exact overeenkomen
-        let c1 = if r.chip_type == r.req_chip_type { 1u64 } else { 0u64 };
+        for i in 0..CHIP_BOOK_SIZE {
+            if !book.offers[i].active && !placed {
+                book.offers[i].chip_type  = offer.chip_type;
+                book.offers[i].volume     = offer.volume;
+                book.offers[i].unit_price = offer.unit_price;
+                book.offers[i].is_supply  = offer.is_supply;
+                book.offers[i].active     = true;
+                book.offers[i].expires_at = offer.expires_at;
+                book.count += 1;
+                placed = true;
+                placed_index = i as u64;
+            }
+        }
 
-        // Criterium 2: aanbod heeft genoeg units
-        let c2 = if r.quantity >= r.min_quantity { 1u64 } else { 0u64 };
-
-        // Criterium 3: conditie is acceptabel (lager=beter, buyer stelt max in)
-        let c3 = if r.condition <= r.max_condition { 1u64 } else { 0u64 };
-
-        // Criterium 4: prijs is binnen budget
-        let c4 = if r.price_per_unit <= r.max_price { 1u64 } else { 0u64 };
-
-        // Criterium 5: levering snel genoeg
-        let c5 = if r.delivery_days <= r.max_delivery { 1u64 } else { 0u64 };
-
-        // Criterium 6: regio klopt (4=global = accepteer altijd)
-        let c6 = if r.list_region == r.req_region { 1u64 }
-                 else if r.list_region == 4u64     { 1u64 }
-                 else if r.req_region  == 4u64     { 1u64 }
-                 else { 0u64 };
-
-        // Criterium 7: certificering voldoende (hoger=beter)
-        let c7 = if r.cert_level >= r.min_cert { 1u64 } else { 0u64 };
-
-        // Match alleen als alle 7 criteria kloppen
-        let matched = c1 * c2 * c3 * c4 * c5 * c6 * c7;
-
-        // Score: elk criterium 14 punten (max 98)
-        let score = (c1 + c2 + c3 + c4 + c5 + c6 + c7) * 14u64;
-
-        let result = ChipMatchResult { matched, score };
-        request.owner.from_arcis(result)
+        (Mxe::get().from_arcis(book), placed_index.reveal())
     }
 
-    /// Versleutelde volumeaggregatie voor marktintelligentie
-    pub struct VolumeData {
-        pub chip_type: u64,
-        pub volume:    u64,  // aantal chips in deze batch
-        pub price:     u64,  // totale waarde (cents)
-    }
-
-    /// Aggregeer volumes van twee partijen zonder individuele data te onthullen
+    /// Vindt beste aanbod (laagste prijs) en beste vraag (hoogste prijs)
+    /// voor dit chiptype, O(n), slaat verlopen aanbiedingen over.
     #[instruction]
-    pub fn aggregate_volume(data: Enc<Shared, VolumeData>) -> Enc<Shared, u64> {
-        let d = data.to_arcis();
-        // Retourneert totaal volume — kan later uitgebreid worden
-        // voor multi-party aggregatie
-        data.owner.from_arcis(d.volume)
+    pub fn match_chip(
+        book_ctxt:    Enc<Mxe, ChipBook>,
+        type_ctxt:    Enc<Shared, u64>,
+        current_time: u64,
+    ) -> (Enc<Shared, ChipMatchResult>, u64, u64) {
+        let book        = book_ctxt.to_arcis();
+        let target_type = type_ctxt.to_arcis();
+
+        let mut has_supply    = false;
+        let mut supply_price: u64 = 0;
+        let mut supply_vol:   u64 = 0;
+        let mut supply_idx:   u64 = CHIP_BOOK_SIZE as u64;
+
+        let mut has_demand    = false;
+        let mut demand_price: u64 = 0;
+        let mut demand_vol:   u64 = 0;
+        let mut demand_idx:   u64 = CHIP_BOOK_SIZE as u64;
+
+        for i in 0..CHIP_BOOK_SIZE {
+            let expired = book.offers[i].expires_at > 0 && book.offers[i].expires_at < current_time;
+            if book.offers[i].active && !expired && book.offers[i].chip_type == target_type {
+                if book.offers[i].is_supply {
+                    if !has_supply || book.offers[i].unit_price < supply_price {
+                        has_supply   = true;
+                        supply_price = book.offers[i].unit_price;
+                        supply_vol   = book.offers[i].volume;
+                        supply_idx   = i as u64;
+                    }
+                } else {
+                    if !has_demand || book.offers[i].unit_price > demand_price {
+                        has_demand   = true;
+                        demand_price = book.offers[i].unit_price;
+                        demand_vol   = book.offers[i].volume;
+                        demand_idx   = i as u64;
+                    }
+                }
+            }
+        }
+
+        let mut result = ChipMatchResult {
+            chip_type:     target_type,
+            matched_vol:   0,
+            matched_price: 0,
+            matched:       false,
+        };
+        let mut out_supply_idx = CHIP_BOOK_SIZE as u64;
+        let mut out_demand_idx = CHIP_BOOK_SIZE as u64;
+
+        if has_supply && has_demand && demand_price >= supply_price {
+            result.matched_vol   = if supply_vol < demand_vol { supply_vol } else { demand_vol };
+            result.matched_price = (supply_price + demand_price) / 2;
+            result.matched       = true;
+            out_supply_idx = supply_idx;
+            out_demand_idx = demand_idx;
+        }
+
+        (type_ctxt.owner.from_arcis(result), out_supply_idx.reveal(), out_demand_idx.reveal())
+    }
+
+    /// Partial fills op volumes: vermindert beide kanten met het gevulde
+    /// volume; alleen volledig gevulde aanbiedingen worden inactief.
+    #[instruction]
+    pub fn settle_chip(
+        book_ctxt:  Enc<Mxe, ChipBook>,
+        supply_idx: u64,
+        demand_idx: u64,
+    ) -> Enc<Mxe, ChipBook> {
+        let mut book = book_ctxt.to_arcis();
+
+        let mut supply_vol: u64 = 0;
+        let mut demand_vol: u64 = 0;
+
+        for i in 0..CHIP_BOOK_SIZE {
+            if (i as u64) == supply_idx {
+                supply_vol = book.offers[i].volume;
+            }
+            if (i as u64) == demand_idx {
+                demand_vol = book.offers[i].volume;
+            }
+        }
+
+        let fill_vol = if supply_vol < demand_vol { supply_vol } else { demand_vol };
+
+        for i in 0..CHIP_BOOK_SIZE {
+            if (i as u64) == supply_idx {
+                book.offers[i].volume = book.offers[i].volume - fill_vol;
+                if book.offers[i].volume == 0 {
+                    book.offers[i].active     = false;
+                    book.offers[i].unit_price = 0;
+                    if book.count > 0 {
+                        book.count -= 1;
+                    }
+                }
+            }
+            if (i as u64) == demand_idx {
+                book.offers[i].volume = book.offers[i].volume - fill_vol;
+                if book.offers[i].volume == 0 {
+                    book.offers[i].active     = false;
+                    book.offers[i].unit_price = 0;
+                    if book.count > 0 {
+                        book.count -= 1;
+                    }
+                }
+            }
+        }
+
+        Mxe::get().from_arcis(book)
+    }
+
+    /// Annuleert het aanbod op de gegeven index (eigendom on-chain gecheckt).
+    #[instruction]
+    pub fn cancel_chip(
+        book_ctxt: Enc<Mxe, ChipBook>,
+        index:     u64,
+    ) -> Enc<Mxe, ChipBook> {
+        let mut book = book_ctxt.to_arcis();
+
+        for i in 0..CHIP_BOOK_SIZE {
+            if (i as u64) == index {
+                book.offers[i].active     = false;
+                book.offers[i].volume     = 0;
+                book.offers[i].unit_price = 0;
+                if book.count > 0 {
+                    book.count -= 1;
+                }
+            }
+        }
+
+        Mxe::get().from_arcis(book)
+    }
+
+    #[instruction]
+    pub fn aggregate_volume(
+        book_ctxt: Enc<Mxe, ChipBook>,
+    ) -> Enc<Mxe, ChipStats> {
+        let book = book_ctxt.to_arcis();
+
+        let mut stats = ChipStats {
+            total_offers:  0,
+            supply_volume: 0,
+            demand_volume: 0,
+        };
+
+        for i in 0..CHIP_BOOK_SIZE {
+            if book.offers[i].active {
+                stats.total_offers += 1;
+                if book.offers[i].is_supply {
+                    stats.supply_volume += book.offers[i].volume;
+                } else {
+                    stats.demand_volume += book.offers[i].volume;
+                }
+            }
+        }
+
+        Mxe::get().from_arcis(stats)
     }
 
     pub struct ReputationData {
