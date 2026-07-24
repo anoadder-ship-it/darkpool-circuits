@@ -1,19 +1,25 @@
 use anchor_lang::prelude::*;
 use arcium_anchor::prelude::*;
 use arcium_macros::circuit_hash;
-use arcium_client::idl::arcium::types::{OffChainCircuitSource, CircuitSource};
+use arcium_client::idl::arcium::types::{OffChainCircuitSource, CircuitSource, CallbackAccount, CallbackInstruction};
 
 const COMP_DEF_OFFSET_REGISTER_SUPPLY: u32 = comp_def_offset("register_supply");
 const COMP_DEF_OFFSET_MATCH_SUPPLY:    u32 = comp_def_offset("match_supply");
-const COMP_DEF_OFFSET_MATCH_CARBON:    u32 = comp_def_offset("match_carbon");
+const COMP_DEF_OFFSET_INIT_BOOK:  u32 = comp_def_offset("init_supply_book");
+const COMP_DEF_OFFSET_SETTLE:     u32 = comp_def_offset("settle_supply");
+const COMP_DEF_OFFSET_CANCEL:     u32 = comp_def_offset("cancel_supply");
+const COMP_DEF_OFFSET_STATS:      u32 = comp_def_offset("get_supply_stats");
 const COMP_DEF_OFFSET_UPDATE_REPUTATION: u32 = comp_def_offset("update_reputation");
 const COMP_DEF_OFFSET_CHECK_THRESHOLD:   u32 = comp_def_offset("check_threshold");
 
 declare_id!("3HQHpSBSgYkx81E25bSJZVz4mGoW6nQFJWDtZL9fmMR4");
 
-const REGISTER_SUPPLY_URL: &str = "https://github.com/anoadder-ship-it/supply-chain-circuits/releases/download/v0.1.0/register_supply.arcis";
-const MATCH_SUPPLY_URL:    &str = "https://github.com/anoadder-ship-it/supply-chain-circuits/releases/download/v0.1.0/match_supply.arcis";
-const MATCH_CARBON_URL:    &str = "https://github.com/anoadder-ship-it/supply-chain-circuits/releases/download/v0.1.0/match_carbon.arcis";
+const REGISTER_SUPPLY_URL: &str = "https://github.com/anoadder-ship-it/supply-chain-circuits/releases/download/v0.3.0/register_supply.arcis";
+const MATCH_SUPPLY_URL:    &str = "https://github.com/anoadder-ship-it/supply-chain-circuits/releases/download/v0.3.0/match_supply.arcis";
+const INIT_BOOK_URL:  &str = "https://github.com/anoadder-ship-it/supply-chain-circuits/releases/download/v0.3.0/init_supply_book.arcis";
+const SETTLE_URL:     &str = "https://github.com/anoadder-ship-it/supply-chain-circuits/releases/download/v0.3.0/settle_supply.arcis";
+const CANCEL_URL:     &str = "https://github.com/anoadder-ship-it/supply-chain-circuits/releases/download/v0.3.0/cancel_supply.arcis";
+const STATS_URL:      &str = "https://github.com/anoadder-ship-it/supply-chain-circuits/releases/download/v0.3.0/get_supply_stats.arcis";
 const UPDATE_REPUTATION_URL: &str = "https://github.com/anoadder-ship-it/supply-chain-circuits/releases/download/v0.2.0/update_reputation.arcis";
 const CHECK_THRESHOLD_URL:   &str = "https://github.com/anoadder-ship-it/supply-chain-circuits/releases/download/v0.2.0/check_threshold.arcis";
 
@@ -37,41 +43,93 @@ pub mod supply_chain_darkpool {
         Ok(())
     }
 
-    pub fn init_match_carbon_comp_def(ctx: Context<InitMatchCarbonCompDef>) -> Result<()> {
+    pub fn init_init_supply_book_comp_def(ctx: Context<InitInitSupplyBookCompDef>) -> Result<()> {
         init_computation_def(ctx.accounts, Some(CircuitSource::OffChain(OffChainCircuitSource {
-            source: MATCH_CARBON_URL.to_string(),
-            hash: circuit_hash!("match_carbon"),
+            source: INIT_BOOK_URL.to_string(),
+            hash: circuit_hash!("init_supply_book"),
         })))?;
+        Ok(())
+    }
+
+    /// Eenmalig: maakt het (grote, versleutelde, MXE-eigendom)
+    /// supply-boek-account aan en vult het met een leeg boek.
+    pub fn initialize_supply_book(
+        ctx: Context<InitializeSupplyBook>,
+        computation_offset: u64,
+    ) -> Result<()> {
+        ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+        let args = ArgBuilder::new().build();
+        let callback_ix = CallbackInstruction {
+            program_id: ID_CONST,
+            discriminator: instruction::InitSupplyBookCallback::DISCRIMINATOR.to_vec(),
+            accounts: vec![
+                CallbackAccount { pubkey: ctx.accounts.arcium_program.key(), is_writable: false },
+                CallbackAccount { pubkey: derive_comp_def_pda!(COMP_DEF_OFFSET_INIT_BOOK), is_writable: false },
+                CallbackAccount { pubkey: derive_mxe_pda!(), is_writable: false },
+                CallbackAccount { pubkey: derive_cluster_pda!(ctx.accounts.mxe_account), is_writable: false },
+                CallbackAccount { pubkey: ::arcium_anchor::solana_instructions_sysvar::ID, is_writable: false },
+                CallbackAccount { pubkey: ctx.accounts.supply_book_state.key(), is_writable: true },
+            ],
+        };
+        queue_computation(ctx.accounts, computation_offset, args, vec![callback_ix], 1, 0, 0)?;
+        Ok(())
+    }
+
+    #[arcium_callback(encrypted_ix = "init_supply_book")]
+    pub fn init_supply_book_callback(
+        ctx: Context<InitSupplyBookCallback>,
+        output: SignedComputationOutputs<InitSupplyBookOutput>,
+    ) -> Result<()> {
+        let o = match output.verify_output(&ctx.accounts.cluster_account, &ctx.accounts.computation_account) {
+            Ok(InitSupplyBookOutput { field_0 }) => field_0,
+            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+        };
+        let data = ctx.accounts.supply_book_state.to_account_info();
+        let mut bytes = data.try_borrow_mut_data()?;
+        for (i, ct) in o.ciphertexts.iter().enumerate() {
+            let start = 8 + i * 32;
+            bytes[start..start + 32].copy_from_slice(ct);
+        }
         Ok(())
     }
 
     pub fn register_supply(
         ctx: Context<RegisterSupply>,
         computation_offset: u64,
-        enc_material:  [u8; 32],
-        enc_quantity:  [u8; 32],
-        enc_quality:   [u8; 32],
-        enc_price:     [u8; 32],
-        enc_delivery:  [u8; 32],
-        enc_region:    [u8; 32],
+        enc_material:   [u8; 32],
+        enc_quantity:   [u8; 32],
+        enc_price:      [u8; 32],
+        enc_is_supply:  [u8; 32],
+        enc_expires_at: [u8; 32],
         pubkey: [u8; 32],
         nonce:  u128,
     ) -> Result<()> {
         require!(ctx.accounts.moeras_pool.status == PoolStatus::Active, ErrorCode::MoerasModeActive);
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
         let args = ArgBuilder::new()
+            .account(ctx.accounts.supply_book_state.key(), 8, (SUPPLY_BOOK_CT_LEN * 32) as u32)
             .x25519_pubkey(pubkey)
             .plaintext_u128(nonce)
             .encrypted_u64(enc_material)
             .encrypted_u64(enc_quantity)
-            .encrypted_u64(enc_quality)
             .encrypted_u64(enc_price)
-            .encrypted_u64(enc_delivery)
-            .encrypted_u64(enc_region)
+            .encrypted_u64(enc_is_supply)
+            .encrypted_u64(enc_expires_at)
             .build();
-        queue_computation(ctx.accounts, computation_offset, args,
-            vec![RegisterSupplyCallback::callback_ix(computation_offset, &ctx.accounts.mxe_account, &[])?],
-            1, 0, 0)?;
+        let callback_ix = CallbackInstruction {
+            program_id: ID_CONST,
+            discriminator: instruction::RegisterSupplyCallback::DISCRIMINATOR.to_vec(),
+            accounts: vec![
+                CallbackAccount { pubkey: ctx.accounts.arcium_program.key(), is_writable: false },
+                CallbackAccount { pubkey: derive_comp_def_pda!(COMP_DEF_OFFSET_REGISTER_SUPPLY), is_writable: false },
+                CallbackAccount { pubkey: derive_mxe_pda!(), is_writable: false },
+                CallbackAccount { pubkey: derive_cluster_pda!(ctx.accounts.mxe_account), is_writable: false },
+                CallbackAccount { pubkey: ::arcium_anchor::solana_instructions_sysvar::ID, is_writable: false },
+                CallbackAccount { pubkey: ctx.accounts.supply_book_state.key(), is_writable: true },
+                CallbackAccount { pubkey: ctx.accounts.payer.key(), is_writable: false },
+            ],
+        };
+        queue_computation(ctx.accounts, computation_offset, args, vec![callback_ix], 1, 0, 0)?;
         Ok(())
     }
 
@@ -81,48 +139,44 @@ pub mod supply_chain_darkpool {
         output: SignedComputationOutputs<RegisterSupplyOutput>,
     ) -> Result<()> {
         let o = match output.verify_output(&ctx.accounts.cluster_account, &ctx.accounts.computation_account) {
-            Ok(RegisterSupplyOutput { field_0 }) => field_0,
+            Ok(RegisterSupplyOutput { field_0 }) => (field_0.field_0, field_0.field_1),
             Err(_) => return Err(ErrorCode::AbortedComputation.into()),
         };
-        emit!(SupplyRegisteredEvent { result: o.ciphertexts[0], nonce: o.nonce.to_le_bytes() });
+        let (book, placed_index) = o;
+        {
+            let data = ctx.accounts.supply_book_state.to_account_info();
+            let mut bytes = data.try_borrow_mut_data()?;
+            for (i, ct) in book.ciphertexts.iter().enumerate() {
+                let start = 8 + i * 32;
+                bytes[start..start + 32].copy_from_slice(ct);
+            }
+            if placed_index < SUPPLY_BOOK_MAX_OFFERS as u64 {
+                let owners_start = 8 + SUPPLY_BOOK_CT_LEN * 32 + (placed_index as usize) * 32;
+                bytes[owners_start..owners_start + 32].copy_from_slice(&ctx.accounts.owner.key().to_bytes());
+            }
+        }
+        emit!(SupplyRegisteredEvent { placed_index, nonce: book.nonce.to_le_bytes() });
         Ok(())
     }
 
+    /// Vindt beste aanbod (laagste prijs) en beste vraag (hoogste prijs)
+    /// voor dit materiaal. Onthult de twee indices.
     pub fn match_supply(
         ctx: Context<MatchSupply>,
         computation_offset: u64,
-        enc_material:  [u8; 32],
-        enc_quantity:  [u8; 32],
-        enc_quality:   [u8; 32],
-        enc_price:     [u8; 32],
-        enc_delivery:  [u8; 32],
-        enc_s_region:  [u8; 32],
-        enc_req_mat:   [u8; 32],
-        enc_min_qty:   [u8; 32],
-        enc_min_qual:  [u8; 32],
-        enc_max_price: [u8; 32],
-        enc_max_del:   [u8; 32],
-        enc_req_reg:   [u8; 32],
+        enc_material: [u8; 32],
+        current_time: u64,
         pubkey: [u8; 32],
         nonce:  u128,
     ) -> Result<()> {
         require!(ctx.accounts.moeras_pool.status == PoolStatus::Active, ErrorCode::MoerasModeActive);
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
         let args = ArgBuilder::new()
+            .account(ctx.accounts.supply_book_state.key(), 8, (SUPPLY_BOOK_CT_LEN * 32) as u32)
             .x25519_pubkey(pubkey)
             .plaintext_u128(nonce)
             .encrypted_u64(enc_material)
-            .encrypted_u64(enc_quantity)
-            .encrypted_u64(enc_quality)
-            .encrypted_u64(enc_price)
-            .encrypted_u64(enc_delivery)
-            .encrypted_u64(enc_s_region)
-            .encrypted_u64(enc_req_mat)
-            .encrypted_u64(enc_min_qty)
-            .encrypted_u64(enc_min_qual)
-            .encrypted_u64(enc_max_price)
-            .encrypted_u64(enc_max_del)
-            .encrypted_u64(enc_req_reg)
+            .plaintext_u64(current_time)
             .build();
         queue_computation(ctx.accounts, computation_offset, args,
             vec![MatchSupplyCallback::callback_ix(computation_offset, &ctx.accounts.mxe_account, &[])?],
@@ -136,72 +190,117 @@ pub mod supply_chain_darkpool {
         output: SignedComputationOutputs<MatchSupplyOutput>,
     ) -> Result<()> {
         let o = match output.verify_output(&ctx.accounts.cluster_account, &ctx.accounts.computation_account) {
-            Ok(MatchSupplyOutput { field_0 }) => field_0,
+            Ok(MatchSupplyOutput { field_0 }) => (field_0.field_0, field_0.field_1, field_0.field_2),
             Err(_) => return Err(ErrorCode::AbortedComputation.into()),
         };
-        emit!(SupplyMatchedEvent {
-            matched: o.ciphertexts[0],
-            score:   o.ciphertexts[1],
-            nonce:   o.nonce.to_le_bytes(),
+        let (result, supply_idx, demand_idx) = o;
+        emit!(SupplyMatchEvent {
+            result: result.ciphertexts[0],
+            nonce:  result.nonce.to_le_bytes(),
+            supply_idx,
+            demand_idx,
         });
         Ok(())
     }
 
-    pub fn match_carbon(
-        ctx: Context<MatchCarbon>,
+    /// Partial fulfillment van een gevonden match.
+    pub fn settle_supply(
+        ctx: Context<SettleSupply>,
         computation_offset: u64,
-        enc_credits:   [u8; 32],
-        enc_price:     [u8; 32],
-        enc_vintage:   [u8; 32],
-        enc_cert:      [u8; 32],
-        enc_req_cred:  [u8; 32],
-        enc_max_price: [u8; 32],
-        enc_req_vint:  [u8; 32],
-        enc_req_cert:  [u8; 32],
-        pubkey: [u8; 32],
-        nonce:  u128,
+        supply_idx: u64,
+        demand_idx: u64,
     ) -> Result<()> {
         require!(ctx.accounts.moeras_pool.status == PoolStatus::Active, ErrorCode::MoerasModeActive);
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
         let args = ArgBuilder::new()
-            .x25519_pubkey(pubkey)
-            .plaintext_u128(nonce)
-            .encrypted_u64(enc_credits)
-            .encrypted_u64(enc_price)
-            .encrypted_u64(enc_vintage)
-            .encrypted_u64(enc_cert)
-            .encrypted_u64(enc_req_cred)
-            .encrypted_u64(enc_max_price)
-            .encrypted_u64(enc_req_vint)
-            .encrypted_u64(enc_req_cert)
+            .account(ctx.accounts.supply_book_state.key(), 8, (SUPPLY_BOOK_CT_LEN * 32) as u32)
+            .plaintext_u64(supply_idx)
+            .plaintext_u64(demand_idx)
             .build();
-        queue_computation(ctx.accounts, computation_offset, args,
-            vec![MatchCarbonCallback::callback_ix(computation_offset, &ctx.accounts.mxe_account, &[])?],
-            1, 0, 0)?;
+        let callback_ix = CallbackInstruction {
+            program_id: ID_CONST,
+            discriminator: instruction::SettleSupplyCallback::DISCRIMINATOR.to_vec(),
+            accounts: vec![
+                CallbackAccount { pubkey: ctx.accounts.arcium_program.key(), is_writable: false },
+                CallbackAccount { pubkey: derive_comp_def_pda!(COMP_DEF_OFFSET_SETTLE), is_writable: false },
+                CallbackAccount { pubkey: derive_mxe_pda!(), is_writable: false },
+                CallbackAccount { pubkey: derive_cluster_pda!(ctx.accounts.mxe_account), is_writable: false },
+                CallbackAccount { pubkey: ::arcium_anchor::solana_instructions_sysvar::ID, is_writable: false },
+                CallbackAccount { pubkey: ctx.accounts.supply_book_state.key(), is_writable: true },
+            ],
+        };
+        queue_computation(ctx.accounts, computation_offset, args, vec![callback_ix], 1, 0, 0)?;
         Ok(())
     }
 
-    #[arcium_callback(encrypted_ix = "match_carbon")]
-    pub fn match_carbon_callback(
-        ctx: Context<MatchCarbonCallback>,
-        output: SignedComputationOutputs<MatchCarbonOutput>,
+    #[arcium_callback(encrypted_ix = "settle_supply")]
+    pub fn settle_supply_callback(
+        ctx: Context<SettleSupplyCallback>,
+        output: SignedComputationOutputs<SettleSupplyOutput>,
     ) -> Result<()> {
         let o = match output.verify_output(&ctx.accounts.cluster_account, &ctx.accounts.computation_account) {
-            Ok(MatchCarbonOutput { field_0 }) => field_0,
+            Ok(SettleSupplyOutput { field_0 }) => field_0,
             Err(_) => return Err(ErrorCode::AbortedComputation.into()),
         };
-        emit!(CarbonMatchedEvent { result: o.ciphertexts[0], nonce: o.nonce.to_le_bytes() });
+        let data = ctx.accounts.supply_book_state.to_account_info();
+        let mut bytes = data.try_borrow_mut_data()?;
+        for (i, ct) in o.ciphertexts.iter().enumerate() {
+            let start = 8 + i * 32;
+            bytes[start..start + 32].copy_from_slice(ct);
+        }
         Ok(())
     }
 
-    // ============================================================
-    // Escrow-mechanisme voor Supply Chain + Carbon Darkpool
-    // Koper stort SOL bij capaciteit/carbon-credit-transactie; verkoper
-    // claimt na levering, of koper disput binnen de termijn. Disputes
-    // worden beslecht via de Squads-multisig (vault-PDA) via
-    // resolve_dispute. Zonder dispute binnen de termijn mag de
-    // verkoper zelf claimen.
-    // ============================================================
+    /// Annuleert de aanbieding op de gegeven index (eigendom on-chain gecheckt).
+    pub fn cancel_supply(
+        ctx: Context<CancelSupply>,
+        computation_offset: u64,
+        index: u64,
+    ) -> Result<()> {
+        require!(ctx.accounts.moeras_pool.status == PoolStatus::Active, ErrorCode::MoerasModeActive);
+        require!(index < SUPPLY_BOOK_MAX_OFFERS as u64, ErrorCode::InvalidOfferIndex);
+        require!(
+            ctx.accounts.supply_book_state.owners[index as usize] == ctx.accounts.payer.key(),
+            ErrorCode::NotOfferOwner
+        );
+        ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+        let args = ArgBuilder::new()
+            .account(ctx.accounts.supply_book_state.key(), 8, (SUPPLY_BOOK_CT_LEN * 32) as u32)
+            .plaintext_u64(index)
+            .build();
+        let callback_ix = CallbackInstruction {
+            program_id: ID_CONST,
+            discriminator: instruction::CancelSupplyCallback::DISCRIMINATOR.to_vec(),
+            accounts: vec![
+                CallbackAccount { pubkey: ctx.accounts.arcium_program.key(), is_writable: false },
+                CallbackAccount { pubkey: derive_comp_def_pda!(COMP_DEF_OFFSET_CANCEL), is_writable: false },
+                CallbackAccount { pubkey: derive_mxe_pda!(), is_writable: false },
+                CallbackAccount { pubkey: derive_cluster_pda!(ctx.accounts.mxe_account), is_writable: false },
+                CallbackAccount { pubkey: ::arcium_anchor::solana_instructions_sysvar::ID, is_writable: false },
+                CallbackAccount { pubkey: ctx.accounts.supply_book_state.key(), is_writable: true },
+            ],
+        };
+        queue_computation(ctx.accounts, computation_offset, args, vec![callback_ix], 1, 0, 0)?;
+        Ok(())
+    }
+
+    #[arcium_callback(encrypted_ix = "cancel_supply")]
+    pub fn cancel_supply_callback(
+        ctx: Context<CancelSupplyCallback>,
+        output: SignedComputationOutputs<CancelSupplyOutput>,
+    ) -> Result<()> {
+        let o = match output.verify_output(&ctx.accounts.cluster_account, &ctx.accounts.computation_account) {
+            Ok(CancelSupplyOutput { field_0 }) => field_0,
+            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+        };
+        let data = ctx.accounts.supply_book_state.to_account_info();
+        let mut bytes = data.try_borrow_mut_data()?;
+        for (i, ct) in o.ciphertexts.iter().enumerate() {
+            let start = 8 + i * 32;
+            bytes[start..start + 32].copy_from_slice(ct);
+        }
+        Ok(())
+    }
 
     pub fn init_update_reputation_comp_def(ctx: Context<InitUpdateReputationCompDef>) -> Result<()> {
         init_computation_def(ctx.accounts, Some(CircuitSource::OffChain(OffChainCircuitSource {
@@ -445,6 +544,119 @@ pub enum PoolStatus {
     Moeras,
 }
 // PoolState account
+pub const SUPPLY_BOOK_CT_LEN: usize = 3001; // 500 offers x 6 ciphertext-elementen + 1 voor count
+pub const SUPPLY_BOOK_MAX_OFFERS: usize = 500;
+
+#[account]
+pub struct SupplyBookState {
+    pub ciphertexts: [[u8; 32]; SUPPLY_BOOK_CT_LEN],
+    pub owners: [Pubkey; SUPPLY_BOOK_MAX_OFFERS],
+}
+impl SupplyBookState {
+    pub const SPACE: usize = 8 + SUPPLY_BOOK_CT_LEN * 32 + SUPPLY_BOOK_MAX_OFFERS * 32;
+}
+
+#[queue_computation_accounts("init_supply_book", payer)]
+#[derive(Accounts)]
+#[instruction(computation_offset: u64)]
+pub struct InitializeSupplyBook<'info> {
+    #[account(mut)] pub payer: Signer<'info>,
+    #[account(init_if_needed, space = 9, payer = payer, seeds = [&SIGN_PDA_SEED], bump, address = derive_sign_pda!())]
+    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
+    #[account(address = derive_mxe_pda!())] pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut, address = derive_mempool_pda!(mxe_account))]
+    /// CHECK: arcium.
+    pub mempool_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_execpool_pda!(mxe_account))]
+    /// CHECK: arcium.
+    pub executing_pool: UncheckedAccount<'info>,
+    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account))]
+    /// CHECK: arcium.
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_INIT_BOOK))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+    #[account(mut, address = derive_cluster_pda!(mxe_account))]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+    #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
+    pub pool_account: Account<'info, FeePool>,
+    #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
+    pub clock_account: Account<'info, ClockAccount>,
+    #[account(init, payer = payer, space = SupplyBookState::SPACE, seeds = [b"supply_book"], bump)]
+    pub supply_book_state: Box<Account<'info, SupplyBookState>>,
+    pub system_program: Program<'info, System>,
+    pub arcium_program: Program<'info, Arcium>,
+}
+
+#[callback_accounts("init_supply_book")]
+#[derive(Accounts)]
+pub struct InitSupplyBookCallback<'info> {
+    pub arcium_program: Program<'info, Arcium>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_INIT_BOOK))]
+    pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Account<'info, MXEAccount>,
+    /// CHECK: arcium.
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_cluster_pda!(mxe_account))]
+    pub cluster_account: Account<'info, Cluster>,
+    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
+    /// CHECK: sysvar.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+    #[account(mut, seeds = [b"supply_book"], bump)]
+    pub supply_book_state: Box<Account<'info, SupplyBookState>>,
+}
+
+#[queue_computation_accounts("cancel_supply", payer)]
+#[derive(Accounts)]
+#[instruction(computation_offset: u64)]
+pub struct CancelSupply<'info> {
+    #[account(mut)] pub payer: Signer<'info>,
+    #[account(init_if_needed, space = 9, payer = payer, seeds = [&SIGN_PDA_SEED], bump, address = derive_sign_pda!())]
+    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
+    #[account(address = derive_mxe_pda!())] pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut, address = derive_mempool_pda!(mxe_account))]
+    /// CHECK: arcium.
+    pub mempool_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_execpool_pda!(mxe_account))]
+    /// CHECK: arcium.
+    pub executing_pool: UncheckedAccount<'info>,
+    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account))]
+    /// CHECK: arcium.
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_CANCEL))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+    pub moeras_pool: Account<'info, PoolState>,
+    #[account(mut, address = derive_cluster_pda!(mxe_account))]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+    #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
+    pub pool_account: Account<'info, FeePool>,
+    #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
+    pub clock_account: Account<'info, ClockAccount>,
+    #[account(mut, seeds = [b"supply_book"], bump)]
+    pub supply_book_state: Box<Account<'info, SupplyBookState>>,
+    pub system_program: Program<'info, System>,
+    pub arcium_program: Program<'info, Arcium>,
+}
+
+#[callback_accounts("cancel_supply")]
+#[derive(Accounts)]
+pub struct CancelSupplyCallback<'info> {
+    pub arcium_program: Program<'info, Arcium>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_CANCEL))]
+    pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Account<'info, MXEAccount>,
+    /// CHECK: arcium.
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_cluster_pda!(mxe_account))]
+    pub cluster_account: Account<'info, Cluster>,
+    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
+    /// CHECK: sysvar.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+    #[account(mut, seeds = [b"supply_book"], bump)]
+    pub supply_book_state: Box<Account<'info, SupplyBookState>>,
+}
+
 #[account]
 pub struct PoolState {
     pub guardian: Pubkey,
@@ -508,6 +720,8 @@ pub struct RegisterSupply<'info> {
     pub pool_account: Account<'info, FeePool>,
     #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
     pub clock_account: Account<'info, ClockAccount>,
+    #[account(mut, seeds = [b"supply_book"], bump)]
+    pub supply_book_state: Box<Account<'info, SupplyBookState>>,
     pub system_program: Program<'info, System>,
     pub arcium_program: Program<'info, Arcium>,
 }
@@ -526,6 +740,10 @@ pub struct RegisterSupplyCallback<'info> {
     #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
     /// CHECK: sysvar.
     pub instructions_sysvar: UncheckedAccount<'info>,
+    #[account(mut, seeds = [b"supply_book"], bump)]
+    pub supply_book_state: Box<Account<'info, SupplyBookState>>,
+    /// CHECK: alleen public key nodig, om eigenaarschap te registreren.
+    pub owner: UncheckedAccount<'info>,
 }
 
 #[init_computation_definition_accounts("register_supply", payer)]
@@ -572,6 +790,8 @@ pub struct MatchSupply<'info> {
     pub pool_account: Account<'info, FeePool>,
     #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
     pub clock_account: Account<'info, ClockAccount>,
+    #[account(seeds = [b"supply_book"], bump)]
+    pub supply_book_state: Box<Account<'info, SupplyBookState>>,
     pub system_program: Program<'info, System>,
     pub arcium_program: Program<'info, Arcium>,
 }
@@ -610,10 +830,10 @@ pub struct InitMatchSupplyCompDef<'info> {
     pub system_program: Program<'info, System>,
 }
 
-#[queue_computation_accounts("match_carbon", payer)]
+#[queue_computation_accounts("settle_supply", payer)]
 #[derive(Accounts)]
 #[instruction(computation_offset: u64)]
-pub struct MatchCarbon<'info> {
+pub struct SettleSupply<'info> {
     #[account(mut)] pub payer: Signer<'info>,
     #[account(init_if_needed, space = 9, payer = payer, seeds = [&SIGN_PDA_SEED], bump, address = derive_sign_pda!())]
     pub sign_pda_account: Account<'info, ArciumSignerAccount>,
@@ -627,7 +847,7 @@ pub struct MatchCarbon<'info> {
     #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account))]
     /// CHECK: arcium.
     pub computation_account: UncheckedAccount<'info>,
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_MATCH_CARBON))]
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_SETTLE))]
     pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
     pub moeras_pool: Account<'info, PoolState>,
     #[account(mut, address = derive_cluster_pda!(mxe_account))]
@@ -636,15 +856,17 @@ pub struct MatchCarbon<'info> {
     pub pool_account: Account<'info, FeePool>,
     #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
     pub clock_account: Account<'info, ClockAccount>,
+    #[account(mut, seeds = [b"supply_book"], bump)]
+    pub supply_book_state: Box<Account<'info, SupplyBookState>>,
     pub system_program: Program<'info, System>,
     pub arcium_program: Program<'info, Arcium>,
 }
 
-#[callback_accounts("match_carbon")]
+#[callback_accounts("settle_supply")]
 #[derive(Accounts)]
-pub struct MatchCarbonCallback<'info> {
+pub struct SettleSupplyCallback<'info> {
     pub arcium_program: Program<'info, Arcium>,
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_MATCH_CARBON))]
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_SETTLE))]
     pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
     #[account(address = derive_mxe_pda!())] pub mxe_account: Account<'info, MXEAccount>,
     /// CHECK: arcium.
@@ -654,11 +876,13 @@ pub struct MatchCarbonCallback<'info> {
     #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
     /// CHECK: sysvar.
     pub instructions_sysvar: UncheckedAccount<'info>,
+    #[account(mut, seeds = [b"supply_book"], bump)]
+    pub supply_book_state: Box<Account<'info, SupplyBookState>>,
 }
 
-#[init_computation_definition_accounts("match_carbon", payer)]
+#[init_computation_definition_accounts("init_supply_book", payer)]
 #[derive(Accounts)]
-pub struct InitMatchCarbonCompDef<'info> {
+pub struct InitInitSupplyBookCompDef<'info> {
     #[account(mut)] pub payer: Signer<'info>,
     #[account(mut, address = derive_mxe_pda!())] pub mxe_account: Box<Account<'info, MXEAccount>>,
     #[account(mut)]
@@ -802,14 +1026,18 @@ pub struct CheckThresholdCallback<'info> {
     pub instructions_sysvar: UncheckedAccount<'info>,
 }
 
-#[event] pub struct SupplyRegisteredEvent { pub result:  [u8; 32], pub nonce: [u8; 16] }
-#[event] pub struct SupplyMatchedEvent    { pub matched: [u8; 32], pub score: [u8; 32], pub nonce: [u8; 16] }
+#[event] pub struct SupplyRegisteredEvent { pub placed_index: u64, pub nonce: [u8; 16] }
+#[event] pub struct SupplyMatchEvent { pub result: [u8; 32], pub nonce: [u8; 16], pub supply_idx: u64, pub demand_idx: u64 }
 #[event] pub struct CarbonMatchedEvent    { pub result:  [u8; 32], pub nonce: [u8; 16] }
 #[event] pub struct ReputationUpdatedEvent { pub completed_trades: [u8; 32], pub disputes_lost: [u8; 32], pub score: [u8; 32], pub nonce: [u8; 16] }
 #[event] pub struct ThresholdCheckedEvent  { pub passes: [u8; 32], pub nonce: [u8; 16] }
 
 #[error_code]
 pub enum ErrorCode {
+    #[msg("Aanbieding-index buiten bereik.")]
+    InvalidOfferIndex,
+    #[msg("Deze aanbieding is niet van jou.")]
+    NotOfferOwner,
     #[msg("The computation was aborted")]
     AbortedComputation,
     #[msg("Escrow amount must be greater than zero")]

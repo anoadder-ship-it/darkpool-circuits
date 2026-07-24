@@ -4,102 +4,248 @@ use arcis::*;
 mod circuits {
     use arcis::*;
 
+    const SUPPLY_BOOK_SIZE: usize = 500;
+
+    #[derive(Clone, Copy)]
     pub struct SupplyOffer {
-        pub material_code: u64,
-        pub quantity:      u64,
-        pub quality_grade: u64,
-        pub price_per_unit:u64,
-        pub delivery_days: u64,
-        pub region_code:   u64,
+        pub material_id: u64,
+        pub quantity:    u64,
+        pub unit_price:  u64,
+        pub is_supply:   bool,  // true = aanbod, false = vraag
+        pub active:      bool,
+        pub expires_at:  u64,   // Unix timestamp, 0 = nooit
     }
 
-    pub struct SupplyDemand {
-        pub material_code:    u64,
-        pub min_quantity:     u64,
-        pub min_quality:      u64,
-        pub max_price:        u64,
-        pub max_delivery_days:u64,
-        pub region_code:      u64,
+    pub struct SupplyBook {
+        pub offers: [SupplyOffer; SUPPLY_BOOK_SIZE],
+        pub count:  u64,
     }
 
-    pub struct MatchRequest {
-        pub material_code: u64,
-        pub quantity:      u64,
-        pub quality_grade: u64,
-        pub price_per_unit:u64,
-        pub delivery_days: u64,
-        pub supply_region: u64,
-        pub req_material:  u64,
-        pub min_quantity:  u64,
-        pub min_quality:   u64,
-        pub max_price:     u64,
-        pub max_delivery:  u64,
-        pub req_region:    u64,
+    pub struct NewSupplyOffer {
+        pub material_id: u64,
+        pub quantity:    u64,
+        pub unit_price:  u64,
+        pub is_supply:   bool,
+        pub expires_at:  u64,
     }
 
-    pub struct MatchResult {
-        pub matched: u64,
-        pub score:   u64,
+    pub struct SupplyMatchResult {
+        pub material_id:   u64,
+        pub matched_qty:   u64,
+        pub matched_price: u64,
+        pub matched:       bool,
+    }
+
+    pub struct SupplyStats {
+        pub total_offers:  u64,
+        pub supply_volume: u64,
+        pub demand_volume: u64,
+    }
+
+    /// Maakt een leeg, versleuteld supply-boek aan (MXE-eigendom).
+    #[instruction]
+    pub fn init_supply_book() -> Enc<Mxe, SupplyBook> {
+        let empty = SupplyOffer {
+            material_id: 0,
+            quantity:    0,
+            unit_price:  0,
+            is_supply:   false,
+            active:      false,
+            expires_at:  0,
+        };
+        let book = SupplyBook {
+            offers: [empty; SUPPLY_BOOK_SIZE],
+            count:  0,
+        };
+        Mxe::get().from_arcis(book)
+    }
+
+    /// Plaatst een aanbod/vraag en onthult alleen de slot-index.
+    #[instruction]
+    pub fn register_supply(
+        book_ctxt:  Enc<Mxe, SupplyBook>,
+        offer_ctxt: Enc<Shared, NewSupplyOffer>,
+    ) -> (Enc<Mxe, SupplyBook>, u64) {
+        let mut book  = book_ctxt.to_arcis();
+        let offer     = offer_ctxt.to_arcis();
+        let mut placed = false;
+        let mut placed_index: u64 = SUPPLY_BOOK_SIZE as u64;
+
+        for i in 0..SUPPLY_BOOK_SIZE {
+            if !book.offers[i].active && !placed {
+                book.offers[i].material_id = offer.material_id;
+                book.offers[i].quantity    = offer.quantity;
+                book.offers[i].unit_price  = offer.unit_price;
+                book.offers[i].is_supply   = offer.is_supply;
+                book.offers[i].active      = true;
+                book.offers[i].expires_at  = offer.expires_at;
+                book.count += 1;
+                placed = true;
+                placed_index = i as u64;
+            }
+        }
+
+        (Mxe::get().from_arcis(book), placed_index.reveal())
+    }
+
+    /// Vindt beste aanbod (laagste prijs) en beste vraag (hoogste prijs)
+    /// voor dit materiaal, O(n), slaat verlopen aanbiedingen over.
+    #[instruction]
+    pub fn match_supply(
+        book_ctxt:    Enc<Mxe, SupplyBook>,
+        mat_ctxt:     Enc<Shared, u64>,
+        current_time: u64,
+    ) -> (Enc<Shared, SupplyMatchResult>, u64, u64) {
+        let book       = book_ctxt.to_arcis();
+        let target_mat = mat_ctxt.to_arcis();
+
+        let mut has_supply    = false;
+        let mut supply_price: u64 = 0;
+        let mut supply_qty:   u64 = 0;
+        let mut supply_idx:   u64 = SUPPLY_BOOK_SIZE as u64;
+
+        let mut has_demand    = false;
+        let mut demand_price: u64 = 0;
+        let mut demand_qty:   u64 = 0;
+        let mut demand_idx:   u64 = SUPPLY_BOOK_SIZE as u64;
+
+        for i in 0..SUPPLY_BOOK_SIZE {
+            let expired = book.offers[i].expires_at > 0 && book.offers[i].expires_at < current_time;
+            if book.offers[i].active && !expired && book.offers[i].material_id == target_mat {
+                if book.offers[i].is_supply {
+                    if !has_supply || book.offers[i].unit_price < supply_price {
+                        has_supply   = true;
+                        supply_price = book.offers[i].unit_price;
+                        supply_qty   = book.offers[i].quantity;
+                        supply_idx   = i as u64;
+                    }
+                } else {
+                    if !has_demand || book.offers[i].unit_price > demand_price {
+                        has_demand   = true;
+                        demand_price = book.offers[i].unit_price;
+                        demand_qty   = book.offers[i].quantity;
+                        demand_idx   = i as u64;
+                    }
+                }
+            }
+        }
+
+        let mut result = SupplyMatchResult {
+            material_id:   target_mat,
+            matched_qty:   0,
+            matched_price: 0,
+            matched:       false,
+        };
+        let mut out_supply_idx = SUPPLY_BOOK_SIZE as u64;
+        let mut out_demand_idx = SUPPLY_BOOK_SIZE as u64;
+
+        if has_supply && has_demand && demand_price >= supply_price {
+            result.matched_qty   = if supply_qty < demand_qty { supply_qty } else { demand_qty };
+            result.matched_price = (supply_price + demand_price) / 2;
+            result.matched       = true;
+            out_supply_idx = supply_idx;
+            out_demand_idx = demand_idx;
+        }
+
+        (mat_ctxt.owner.from_arcis(result), out_supply_idx.reveal(), out_demand_idx.reveal())
+    }
+
+    /// Partial fulfillment: vermindert beide kanten met de gevulde
+    /// hoeveelheid; alleen volledig gevulde aanbiedingen worden inactief.
+    #[instruction]
+    pub fn settle_supply(
+        book_ctxt:  Enc<Mxe, SupplyBook>,
+        supply_idx: u64,
+        demand_idx: u64,
+    ) -> Enc<Mxe, SupplyBook> {
+        let mut book = book_ctxt.to_arcis();
+
+        let mut supply_qty: u64 = 0;
+        let mut demand_qty: u64 = 0;
+
+        for i in 0..SUPPLY_BOOK_SIZE {
+            if (i as u64) == supply_idx {
+                supply_qty = book.offers[i].quantity;
+            }
+            if (i as u64) == demand_idx {
+                demand_qty = book.offers[i].quantity;
+            }
+        }
+
+        let fill_qty = if supply_qty < demand_qty { supply_qty } else { demand_qty };
+
+        for i in 0..SUPPLY_BOOK_SIZE {
+            if (i as u64) == supply_idx {
+                book.offers[i].quantity = book.offers[i].quantity - fill_qty;
+                if book.offers[i].quantity == 0 {
+                    book.offers[i].active     = false;
+                    book.offers[i].unit_price = 0;
+                    if book.count > 0 {
+                        book.count -= 1;
+                    }
+                }
+            }
+            if (i as u64) == demand_idx {
+                book.offers[i].quantity = book.offers[i].quantity - fill_qty;
+                if book.offers[i].quantity == 0 {
+                    book.offers[i].active     = false;
+                    book.offers[i].unit_price = 0;
+                    if book.count > 0 {
+                        book.count -= 1;
+                    }
+                }
+            }
+        }
+
+        Mxe::get().from_arcis(book)
+    }
+
+    /// Annuleert de aanbieding op de gegeven index (eigendom on-chain gecheckt).
+    #[instruction]
+    pub fn cancel_supply(
+        book_ctxt: Enc<Mxe, SupplyBook>,
+        index:     u64,
+    ) -> Enc<Mxe, SupplyBook> {
+        let mut book = book_ctxt.to_arcis();
+
+        for i in 0..SUPPLY_BOOK_SIZE {
+            if (i as u64) == index {
+                book.offers[i].active      = false;
+                book.offers[i].quantity    = 0;
+                book.offers[i].unit_price  = 0;
+                if book.count > 0 {
+                    book.count -= 1;
+                }
+            }
+        }
+
+        Mxe::get().from_arcis(book)
     }
 
     #[instruction]
-    pub fn register_supply(offer: Enc<Shared, SupplyOffer>) -> Enc<Shared, u64> {
-        let _o = offer.to_arcis();
-        offer.owner.from_arcis(1u64)
-    }
+    pub fn get_supply_stats(
+        book_ctxt: Enc<Mxe, SupplyBook>,
+    ) -> Enc<Mxe, SupplyStats> {
+        let book = book_ctxt.to_arcis();
 
-    #[instruction]
-    pub fn match_supply(request: Enc<Shared, MatchRequest>) -> Enc<Shared, MatchResult> {
-        let r = request.to_arcis();
+        let mut stats = SupplyStats {
+            total_offers:  0,
+            supply_volume: 0,
+            demand_volume: 0,
+        };
 
-        let material_ok  = if r.material_code == r.req_material  { 1u64 } else { 0u64 };
-        let quantity_ok  = if r.quantity      >= r.min_quantity   { 1u64 } else { 0u64 };
-        let quality_ok   = if r.quality_grade >= r.min_quality    { 1u64 } else { 0u64 };
-        let price_ok     = if r.price_per_unit <= r.max_price     { 1u64 } else { 0u64 };
-        let delivery_ok  = if r.delivery_days  <= r.max_delivery  { 1u64 } else { 0u64 };
-        let region_ok    = if r.supply_region  == r.req_region    { 1u64 } else { 0u64 };
+        for i in 0..SUPPLY_BOOK_SIZE {
+            if book.offers[i].active {
+                stats.total_offers += 1;
+                if book.offers[i].is_supply {
+                    stats.supply_volume += book.offers[i].quantity;
+                } else {
+                    stats.demand_volume += book.offers[i].quantity;
+                }
+            }
+        }
 
-        let matched = material_ok * quantity_ok * quality_ok * price_ok * delivery_ok * region_ok;
-        let score = (material_ok + quantity_ok + quality_ok + price_ok + delivery_ok + region_ok) * 16u64;
-
-        let result = MatchResult { matched, score };
-        request.owner.from_arcis(result)
-    }
-
-    pub struct CarbonOffer {
-        pub credits:    u64,
-        pub price:      u64,
-        pub vintage:    u64,
-        pub cert_type:  u64,
-    }
-
-    pub struct CarbonDemand {
-        pub min_credits: u64,
-        pub max_price:   u64,
-        pub min_vintage: u64,
-        pub cert_type:   u64,
-    }
-
-    pub struct CarbonMatch {
-        pub offer_credits: u64,
-        pub offer_price:   u64,
-        pub offer_vintage: u64,
-        pub offer_cert:    u64,
-        pub req_credits:   u64,
-        pub req_max_price: u64,
-        pub req_vintage:   u64,
-        pub req_cert:      u64,
-    }
-
-    #[instruction]
-    pub fn match_carbon(request: Enc<Shared, CarbonMatch>) -> Enc<Shared, u64> {
-        let r = request.to_arcis();
-        let credits_ok = if r.offer_credits  >= r.req_credits  { 1u64 } else { 0u64 };
-        let price_ok   = if r.offer_price    <= r.req_max_price { 1u64 } else { 0u64 };
-        let vintage_ok = if r.offer_vintage  >= r.req_vintage   { 1u64 } else { 0u64 };
-        let cert_ok    = if r.offer_cert     == r.req_cert      { 1u64 } else { 0u64 };
-        let matched = credits_ok * price_ok * vintage_ok * cert_ok;
-        request.owner.from_arcis(matched)
+        Mxe::get().from_arcis(stats)
     }
 
     pub struct ReputationData {
