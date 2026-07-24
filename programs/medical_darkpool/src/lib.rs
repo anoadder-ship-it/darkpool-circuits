@@ -1,19 +1,21 @@
 use anchor_lang::prelude::*;
 use arcium_anchor::prelude::*;
 use arcium_macros::circuit_hash;
-use arcium_client::idl::arcium::types::{OffChainCircuitSource, CircuitSource};
+use arcium_client::idl::arcium::types::{OffChainCircuitSource, CircuitSource, CallbackAccount, CallbackInstruction};
 
 const COMP_DEF_OFFSET_REGISTER: u32 = comp_def_offset("register_dataset");
-const COMP_DEF_OFFSET_MATCH:    u32 = comp_def_offset("match_dataset");
-const COMP_DEF_OFFSET_AGGREGATE:u32 = comp_def_offset("aggregate_gradient");
+const COMP_DEF_OFFSET_SEARCH:   u32 = comp_def_offset("search_datasets");
+const COMP_DEF_OFFSET_INIT_REGISTRY: u32 = comp_def_offset("init_registry");
+const COMP_DEF_OFFSET_REMOVE:   u32 = comp_def_offset("remove_dataset");
 const COMP_DEF_OFFSET_UPDATE_REPUTATION: u32 = comp_def_offset("update_reputation");
 const COMP_DEF_OFFSET_CHECK_THRESHOLD:   u32 = comp_def_offset("check_threshold");
 
 declare_id!("CZQBaJFJnGA2pyEnrfxCmsUewcHJLDGHgzrcVjomzDD4");
 
-const REGISTER_URL:  &str = "https://github.com/anoadder-ship-it/medical-circuits/releases/download/v0.1.0/register_dataset.arcis";
-const MATCH_URL:     &str = "https://github.com/anoadder-ship-it/medical-circuits/releases/download/v0.1.0/match_dataset.arcis";
-const AGGREGATE_URL: &str = "https://github.com/anoadder-ship-it/medical-circuits/releases/download/v0.1.0/aggregate_gradient.arcis";
+const REGISTER_URL:  &str = "https://github.com/anoadder-ship-it/medical-circuits/releases/download/v0.3.0/register_dataset.arcis";
+const SEARCH_URL:    &str = "https://github.com/anoadder-ship-it/medical-circuits/releases/download/v0.3.0/search_datasets.arcis";
+const INIT_REGISTRY_URL: &str = "https://github.com/anoadder-ship-it/medical-circuits/releases/download/v0.3.0/init_registry.arcis";
+const REMOVE_URL:    &str = "https://github.com/anoadder-ship-it/medical-circuits/releases/download/v0.3.0/remove_dataset.arcis";
 const UPDATE_REPUTATION_URL: &str = "https://github.com/anoadder-ship-it/medical-circuits/releases/download/v0.2.0/update_reputation.arcis";
 const CHECK_THRESHOLD_URL:   &str = "https://github.com/anoadder-ship-it/medical-circuits/releases/download/v0.2.0/check_threshold.arcis";
 
@@ -29,36 +31,80 @@ pub mod medical_darkpool {
         Ok(())
     }
 
-    pub fn init_match_comp_def(ctx: Context<InitMatchCompDef>) -> Result<()> {
+    pub fn init_search_comp_def(ctx: Context<InitSearchCompDef>) -> Result<()> {
         init_computation_def(ctx.accounts, Some(CircuitSource::OffChain(OffChainCircuitSource {
-            source: MATCH_URL.to_string(),
-            hash: circuit_hash!("match_dataset"),
+            source: SEARCH_URL.to_string(),
+            hash: circuit_hash!("search_datasets"),
         })))?;
         Ok(())
     }
 
-    pub fn init_aggregate_comp_def(ctx: Context<InitAggregateCompDef>) -> Result<()> {
+    pub fn init_init_registry_comp_def(ctx: Context<InitInitRegistryCompDef>) -> Result<()> {
         init_computation_def(ctx.accounts, Some(CircuitSource::OffChain(OffChainCircuitSource {
-            source: AGGREGATE_URL.to_string(),
-            hash: circuit_hash!("aggregate_gradient"),
+            source: INIT_REGISTRY_URL.to_string(),
+            hash: circuit_hash!("init_registry"),
         })))?;
+        Ok(())
+    }
+
+    /// Eenmalig: maakt het (grote, versleutelde, MXE-eigendom)
+    /// register-account aan en vult het met een leeg register.
+    pub fn initialize_registry(
+        ctx: Context<InitializeRegistry>,
+        computation_offset: u64,
+    ) -> Result<()> {
+        ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+        let args = ArgBuilder::new().build();
+        let callback_ix = CallbackInstruction {
+            program_id: ID_CONST,
+            discriminator: instruction::InitRegistryCallback::DISCRIMINATOR.to_vec(),
+            accounts: vec![
+                CallbackAccount { pubkey: ctx.accounts.arcium_program.key(), is_writable: false },
+                CallbackAccount { pubkey: derive_comp_def_pda!(COMP_DEF_OFFSET_INIT_REGISTRY), is_writable: false },
+                CallbackAccount { pubkey: derive_mxe_pda!(), is_writable: false },
+                CallbackAccount { pubkey: derive_cluster_pda!(ctx.accounts.mxe_account), is_writable: false },
+                CallbackAccount { pubkey: ::arcium_anchor::solana_instructions_sysvar::ID, is_writable: false },
+                CallbackAccount { pubkey: ctx.accounts.registry_state.key(), is_writable: true },
+            ],
+        };
+        queue_computation(ctx.accounts, computation_offset, args, vec![callback_ix], 1, 0, 0)?;
+        Ok(())
+    }
+
+    #[arcium_callback(encrypted_ix = "init_registry")]
+    pub fn init_registry_callback(
+        ctx: Context<InitRegistryCallback>,
+        output: SignedComputationOutputs<InitRegistryOutput>,
+    ) -> Result<()> {
+        let o = match output.verify_output(&ctx.accounts.cluster_account, &ctx.accounts.computation_account) {
+            Ok(InitRegistryOutput { field_0 }) => field_0,
+            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+        };
+        let data = ctx.accounts.registry_state.to_account_info();
+        let mut bytes = data.try_borrow_mut_data()?;
+        for (i, ct) in o.ciphertexts.iter().enumerate() {
+            let start = 8 + i * 32;
+            bytes[start..start + 32].copy_from_slice(ct);
+        }
         Ok(())
     }
 
     pub fn register_dataset(
         ctx: Context<RegisterDataset>,
         computation_offset: u64,
-        enc_disease:  [u8; 32],
-        enc_samples:  [u8; 32],
-        enc_age:      [u8; 32],
-        enc_gender:   [u8; 32],
-        enc_modality: [u8; 32],
+        enc_disease:    [u8; 32],
+        enc_samples:    [u8; 32],
+        enc_age:        [u8; 32],
+        enc_gender:     [u8; 32],
+        enc_modality:   [u8; 32],
+        enc_expires_at: [u8; 32],
         pubkey: [u8; 32],
         nonce:  u128,
     ) -> Result<()> {
         require!(ctx.accounts.moeras_pool.status == PoolStatus::Active, ErrorCode::MoerasModeActive);
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
         let args = ArgBuilder::new()
+            .account(ctx.accounts.registry_state.key(), 8, (REGISTRY_CT_LEN * 32) as u32)
             .x25519_pubkey(pubkey)
             .plaintext_u128(nonce)
             .encrypted_u64(enc_disease)
@@ -66,10 +112,22 @@ pub mod medical_darkpool {
             .encrypted_u64(enc_age)
             .encrypted_u64(enc_gender)
             .encrypted_u64(enc_modality)
+            .encrypted_u64(enc_expires_at)
             .build();
-        queue_computation(ctx.accounts, computation_offset, args,
-            vec![RegisterDatasetCallback::callback_ix(computation_offset, &ctx.accounts.mxe_account, &[])?],
-            1, 0, 0)?;
+        let callback_ix = CallbackInstruction {
+            program_id: ID_CONST,
+            discriminator: instruction::RegisterDatasetCallback::DISCRIMINATOR.to_vec(),
+            accounts: vec![
+                CallbackAccount { pubkey: ctx.accounts.arcium_program.key(), is_writable: false },
+                CallbackAccount { pubkey: derive_comp_def_pda!(COMP_DEF_OFFSET_REGISTER), is_writable: false },
+                CallbackAccount { pubkey: derive_mxe_pda!(), is_writable: false },
+                CallbackAccount { pubkey: derive_cluster_pda!(ctx.accounts.mxe_account), is_writable: false },
+                CallbackAccount { pubkey: ::arcium_anchor::solana_instructions_sysvar::ID, is_writable: false },
+                CallbackAccount { pubkey: ctx.accounts.registry_state.key(), is_writable: true },
+                CallbackAccount { pubkey: ctx.accounts.payer.key(), is_writable: false },
+            ],
+        };
+        queue_computation(ctx.accounts, computation_offset, args, vec![callback_ix], 1, 0, 0)?;
         Ok(())
     }
 
@@ -79,97 +137,135 @@ pub mod medical_darkpool {
         output: SignedComputationOutputs<RegisterDatasetOutput>,
     ) -> Result<()> {
         let o = match output.verify_output(&ctx.accounts.cluster_account, &ctx.accounts.computation_account) {
-            Ok(RegisterDatasetOutput { field_0 }) => field_0,
+            Ok(RegisterDatasetOutput { field_0 }) => (field_0.field_0, field_0.field_1),
             Err(_) => return Err(ErrorCode::AbortedComputation.into()),
         };
-        emit!(DatasetRegisteredEvent { result: o.ciphertexts[0], nonce: o.nonce.to_le_bytes() });
+        let (reg, placed_index) = o;
+        {
+            let data = ctx.accounts.registry_state.to_account_info();
+            let mut bytes = data.try_borrow_mut_data()?;
+            for (i, ct) in reg.ciphertexts.iter().enumerate() {
+                let start = 8 + i * 32;
+                bytes[start..start + 32].copy_from_slice(ct);
+            }
+            if placed_index < REGISTRY_MAX_DATASETS as u64 {
+                let owners_start = 8 + REGISTRY_CT_LEN * 32 + (placed_index as usize) * 32;
+                bytes[owners_start..owners_start + 32].copy_from_slice(&ctx.accounts.owner.key().to_bytes());
+            }
+        }
+        emit!(DatasetRegisteredEvent { placed_index, nonce: reg.nonce.to_le_bytes() });
         Ok(())
     }
 
-    pub fn match_dataset(
-        ctx: Context<MatchDataset>,
+    /// Doorzoekt het hele register op de best passende dataset (O(n),
+    /// score-prioriteit, verlopen datasets overgeslagen). Onthult de index.
+    pub fn search_datasets(
+        ctx: Context<SearchDatasets>,
         computation_offset: u64,
-        enc_disease:       [u8; 32],
-        enc_samples:       [u8; 32],
-        enc_age:           [u8; 32],
-        enc_gender:        [u8; 32],
-        enc_modality:      [u8; 32],
         enc_q_disease:     [u8; 32],
         enc_q_min_samples: [u8; 32],
         enc_q_age_min:     [u8; 32],
         enc_q_age_max:     [u8; 32],
         enc_q_modality:    [u8; 32],
+        current_time: u64,
         pubkey: [u8; 32],
         nonce:  u128,
     ) -> Result<()> {
         require!(ctx.accounts.moeras_pool.status == PoolStatus::Active, ErrorCode::MoerasModeActive);
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
         let args = ArgBuilder::new()
+            .account(ctx.accounts.registry_state.key(), 8, (REGISTRY_CT_LEN * 32) as u32)
             .x25519_pubkey(pubkey)
             .plaintext_u128(nonce)
-            .encrypted_u64(enc_disease)
-            .encrypted_u64(enc_samples)
-            .encrypted_u64(enc_age)
-            .encrypted_u64(enc_gender)
-            .encrypted_u64(enc_modality)
             .encrypted_u64(enc_q_disease)
             .encrypted_u64(enc_q_min_samples)
             .encrypted_u64(enc_q_age_min)
             .encrypted_u64(enc_q_age_max)
             .encrypted_u64(enc_q_modality)
+            .plaintext_u64(current_time)
             .build();
         queue_computation(ctx.accounts, computation_offset, args,
-            vec![MatchDatasetCallback::callback_ix(computation_offset, &ctx.accounts.mxe_account, &[])?],
+            vec![SearchDatasetsCallback::callback_ix(computation_offset, &ctx.accounts.mxe_account, &[])?],
             1, 0, 0)?;
         Ok(())
     }
 
-    #[arcium_callback(encrypted_ix = "match_dataset")]
-    pub fn match_dataset_callback(
-        ctx: Context<MatchDatasetCallback>,
-        output: SignedComputationOutputs<MatchDatasetOutput>,
+    #[arcium_callback(encrypted_ix = "search_datasets")]
+    pub fn search_datasets_callback(
+        ctx: Context<SearchDatasetsCallback>,
+        output: SignedComputationOutputs<SearchDatasetsOutput>,
     ) -> Result<()> {
         let o = match output.verify_output(&ctx.accounts.cluster_account, &ctx.accounts.computation_account) {
-            Ok(MatchDatasetOutput { field_0 }) => field_0,
+            Ok(SearchDatasetsOutput { field_0 }) => (field_0.field_0, field_0.field_1),
             Err(_) => return Err(ErrorCode::AbortedComputation.into()),
         };
-        emit!(DatasetMatchedEvent {
-            compatible: o.ciphertexts[0],
-            score:      o.ciphertexts[1],
-            nonce:      o.nonce.to_le_bytes(),
+        let (result, best_idx) = o;
+        emit!(DatasetSearchEvent {
+            best_score: result.ciphertexts[0],
+            found:      result.ciphertexts[1],
+            nonce:      result.nonce.to_le_bytes(),
+            best_idx,
         });
         Ok(())
     }
 
-    pub fn aggregate_gradient(
-        ctx: Context<AggregateGradient>,
+    /// Verwijdert de dataset op de gegeven index. Eigendom wordt on-chain
+    /// gecontroleerd via het plaintext owners-array.
+    pub fn remove_dataset(
+        ctx: Context<RemoveDataset>,
         computation_offset: u64,
-        enc_gradient: [u8; 32],
-        pubkey: [u8; 32],
-        nonce:  u128,
+        index: u64,
     ) -> Result<()> {
+        require!(ctx.accounts.moeras_pool.status == PoolStatus::Active, ErrorCode::MoerasModeActive);
+        require!(index < REGISTRY_MAX_DATASETS as u64, ErrorCode::InvalidDatasetIndex);
+        require!(
+            ctx.accounts.registry_state.owners[index as usize] == ctx.accounts.payer.key(),
+            ErrorCode::NotDatasetOwner
+        );
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
         let args = ArgBuilder::new()
-            .x25519_pubkey(pubkey)
-            .plaintext_u128(nonce)
-            .encrypted_u64(enc_gradient)
+            .account(ctx.accounts.registry_state.key(), 8, (REGISTRY_CT_LEN * 32) as u32)
+            .plaintext_u64(index)
             .build();
-        queue_computation(ctx.accounts, computation_offset, args,
-            vec![AggregateGradientCallback::callback_ix(computation_offset, &ctx.accounts.mxe_account, &[])?],
-            1, 0, 0)?;
+        let callback_ix = CallbackInstruction {
+            program_id: ID_CONST,
+            discriminator: instruction::RemoveDatasetCallback::DISCRIMINATOR.to_vec(),
+            accounts: vec![
+                CallbackAccount { pubkey: ctx.accounts.arcium_program.key(), is_writable: false },
+                CallbackAccount { pubkey: derive_comp_def_pda!(COMP_DEF_OFFSET_REMOVE), is_writable: false },
+                CallbackAccount { pubkey: derive_mxe_pda!(), is_writable: false },
+                CallbackAccount { pubkey: derive_cluster_pda!(ctx.accounts.mxe_account), is_writable: false },
+                CallbackAccount { pubkey: ::arcium_anchor::solana_instructions_sysvar::ID, is_writable: false },
+                CallbackAccount { pubkey: ctx.accounts.registry_state.key(), is_writable: true },
+            ],
+        };
+        queue_computation(ctx.accounts, computation_offset, args, vec![callback_ix], 1, 0, 0)?;
         Ok(())
     }
 
-    #[arcium_callback(encrypted_ix = "aggregate_gradient")]
-    pub fn aggregate_gradient_callback(
-        ctx: Context<AggregateGradientCallback>,
-        output: SignedComputationOutputs<AggregateGradientOutput>,
+    #[arcium_callback(encrypted_ix = "remove_dataset")]
+    pub fn remove_dataset_callback(
+        ctx: Context<RemoveDatasetCallback>,
+        output: SignedComputationOutputs<RemoveDatasetOutput>,
     ) -> Result<()> {
         let o = match output.verify_output(&ctx.accounts.cluster_account, &ctx.accounts.computation_account) {
-            Ok(AggregateGradientOutput { field_0 }) => field_0,
+            Ok(RemoveDatasetOutput { field_0 }) => field_0,
             Err(_) => return Err(ErrorCode::AbortedComputation.into()),
         };
-        emit!(GradientAggregatedEvent { result: o.ciphertexts[0], nonce: o.nonce.to_le_bytes() });
+        let data = ctx.accounts.registry_state.to_account_info();
+        let mut bytes = data.try_borrow_mut_data()?;
+        for (i, ct) in o.ciphertexts.iter().enumerate() {
+            let start = 8 + i * 32;
+            bytes[start..start + 32].copy_from_slice(ct);
+        }
+        Ok(())
+    }
+
+    pub fn init_remove_comp_def(ctx: Context<InitRemoveCompDef>) -> Result<()> {
+        init_computation_def(ctx.accounts, Some(CircuitSource::OffChain(OffChainCircuitSource {
+            source: REMOVE_URL.to_string(),
+            hash: circuit_hash!("remove_dataset"),
+        })))?;
         Ok(())
     }
 
@@ -423,6 +519,87 @@ pub enum PoolStatus {
     Moeras,
 }
 // PoolState account
+#[init_computation_definition_accounts("remove_dataset", payer)]
+#[derive(Accounts)]
+pub struct InitRemoveCompDef<'info> {
+    #[account(mut)] pub payer: Signer<'info>,
+    #[account(mut, address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut)]
+    /// CHECK: not yet initialized.
+    pub comp_def_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
+    /// CHECK: arcium.
+    pub address_lookup_table: UncheckedAccount<'info>,
+    #[account(address = LUT_PROGRAM_ID)]
+    /// CHECK: LUT.
+    pub lut_program: UncheckedAccount<'info>,
+    pub arcium_program: Program<'info, Arcium>,
+    pub system_program: Program<'info, System>,
+}
+
+pub const REGISTRY_CT_LEN: usize = 3501; // 500 datasets x 7 ciphertext-elementen + 1 voor count
+pub const REGISTRY_MAX_DATASETS: usize = 500;
+
+#[account]
+pub struct RegistryState {
+    pub ciphertexts: [[u8; 32]; REGISTRY_CT_LEN],
+    pub owners: [Pubkey; REGISTRY_MAX_DATASETS],
+}
+impl RegistryState {
+    pub const SPACE: usize = 8 + REGISTRY_CT_LEN * 32 + REGISTRY_MAX_DATASETS * 32;
+}
+
+#[queue_computation_accounts("init_registry", payer)]
+#[derive(Accounts)]
+#[instruction(computation_offset: u64)]
+pub struct InitializeRegistry<'info> {
+    #[account(mut)] pub payer: Signer<'info>,
+    #[account(init_if_needed, space = 9, payer = payer, seeds = [&SIGN_PDA_SEED], bump, address = derive_sign_pda!())]
+    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
+    #[account(address = derive_mxe_pda!())] pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut, address = derive_mempool_pda!(mxe_account))]
+    /// CHECK: arcium.
+    pub mempool_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_execpool_pda!(mxe_account))]
+    /// CHECK: arcium.
+    pub executing_pool: UncheckedAccount<'info>,
+    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account))]
+    /// CHECK: arcium.
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_INIT_REGISTRY))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+    #[account(mut, address = derive_cluster_pda!(mxe_account))]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+    #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
+    pub pool_account: Account<'info, FeePool>,
+    #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
+    pub clock_account: Account<'info, ClockAccount>,
+    #[account(init, payer = payer, space = RegistryState::SPACE, seeds = [b"registry"], bump)]
+    pub registry_state: Box<Account<'info, RegistryState>>,
+    pub system_program: Program<'info, System>,
+    pub arcium_program: Program<'info, Arcium>,
+}
+
+#[callback_accounts("init_registry")]
+#[derive(Accounts)]
+pub struct InitRegistryCallback<'info> {
+    pub arcium_program: Program<'info, Arcium>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_INIT_REGISTRY))]
+    pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Account<'info, MXEAccount>,
+    /// CHECK: arcium.
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_cluster_pda!(mxe_account))]
+    pub cluster_account: Account<'info, Cluster>,
+    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
+    /// CHECK: sysvar.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+    #[account(mut, seeds = [b"registry"], bump)]
+    pub registry_state: Box<Account<'info, RegistryState>>,
+}
+
 #[account]
 pub struct PoolState {
     pub guardian: Pubkey,
@@ -486,6 +663,8 @@ pub struct RegisterDataset<'info> {
     pub pool_account: Account<'info, FeePool>,
     #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
     pub clock_account: Account<'info, ClockAccount>,
+    #[account(mut, seeds = [b"registry"], bump)]
+    pub registry_state: Box<Account<'info, RegistryState>>,
     pub system_program: Program<'info, System>,
     pub arcium_program: Program<'info, Arcium>,
 }
@@ -504,6 +683,10 @@ pub struct RegisterDatasetCallback<'info> {
     #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
     /// CHECK: sysvar.
     pub instructions_sysvar: UncheckedAccount<'info>,
+    #[account(mut, seeds = [b"registry"], bump)]
+    pub registry_state: Box<Account<'info, RegistryState>>,
+    /// CHECK: alleen public key nodig, om eigenaarschap te registreren.
+    pub owner: UncheckedAccount<'info>,
 }
 
 #[init_computation_definition_accounts("register_dataset", payer)]
@@ -525,10 +708,10 @@ pub struct InitRegisterCompDef<'info> {
     pub system_program: Program<'info, System>,
 }
 
-#[queue_computation_accounts("match_dataset", payer)]
+#[queue_computation_accounts("search_datasets", payer)]
 #[derive(Accounts)]
 #[instruction(computation_offset: u64)]
-pub struct MatchDataset<'info> {
+pub struct SearchDatasets<'info> {
     #[account(mut)] pub payer: Signer<'info>,
     #[account(init_if_needed, space = 9, payer = payer, seeds = [&SIGN_PDA_SEED], bump, address = derive_sign_pda!())]
     pub sign_pda_account: Account<'info, ArciumSignerAccount>,
@@ -542,7 +725,7 @@ pub struct MatchDataset<'info> {
     #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account))]
     /// CHECK: arcium.
     pub computation_account: UncheckedAccount<'info>,
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_MATCH))]
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_SEARCH))]
     pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
     pub moeras_pool: Account<'info, PoolState>,
     #[account(mut, address = derive_cluster_pda!(mxe_account))]
@@ -552,14 +735,16 @@ pub struct MatchDataset<'info> {
     #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
     pub clock_account: Account<'info, ClockAccount>,
     pub system_program: Program<'info, System>,
+        #[account(seeds = [b"registry"], bump)]
+    pub registry_state: Box<Account<'info, RegistryState>>,
     pub arcium_program: Program<'info, Arcium>,
 }
 
-#[callback_accounts("match_dataset")]
+#[callback_accounts("search_datasets")]
 #[derive(Accounts)]
-pub struct MatchDatasetCallback<'info> {
+pub struct SearchDatasetsCallback<'info> {
     pub arcium_program: Program<'info, Arcium>,
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_MATCH))]
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_SEARCH))]
     pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
     #[account(address = derive_mxe_pda!())] pub mxe_account: Account<'info, MXEAccount>,
     /// CHECK: arcium.
@@ -571,9 +756,9 @@ pub struct MatchDatasetCallback<'info> {
     pub instructions_sysvar: UncheckedAccount<'info>,
 }
 
-#[init_computation_definition_accounts("match_dataset", payer)]
+#[init_computation_definition_accounts("search_datasets", payer)]
 #[derive(Accounts)]
-pub struct InitMatchCompDef<'info> {
+pub struct InitSearchCompDef<'info> {
     #[account(mut)] pub payer: Signer<'info>,
     #[account(mut, address = derive_mxe_pda!())]
     pub mxe_account: Box<Account<'info, MXEAccount>>,
@@ -590,10 +775,10 @@ pub struct InitMatchCompDef<'info> {
     pub system_program: Program<'info, System>,
 }
 
-#[queue_computation_accounts("aggregate_gradient", payer)]
+#[queue_computation_accounts("remove_dataset", payer)]
 #[derive(Accounts)]
 #[instruction(computation_offset: u64)]
-pub struct AggregateGradient<'info> {
+pub struct RemoveDataset<'info> {
     #[account(mut)] pub payer: Signer<'info>,
     #[account(init_if_needed, space = 9, payer = payer, seeds = [&SIGN_PDA_SEED], bump, address = derive_sign_pda!())]
     pub sign_pda_account: Account<'info, ArciumSignerAccount>,
@@ -607,7 +792,7 @@ pub struct AggregateGradient<'info> {
     #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account))]
     /// CHECK: arcium.
     pub computation_account: UncheckedAccount<'info>,
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_AGGREGATE))]
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_REMOVE))]
     pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
     #[account(mut, address = derive_cluster_pda!(mxe_account))]
     pub cluster_account: Box<Account<'info, Cluster>>,
@@ -616,14 +801,17 @@ pub struct AggregateGradient<'info> {
     #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
     pub clock_account: Account<'info, ClockAccount>,
     pub system_program: Program<'info, System>,
+        pub moeras_pool: Account<'info, PoolState>,
+    #[account(mut, seeds = [b"registry"], bump)]
+    pub registry_state: Box<Account<'info, RegistryState>>,
     pub arcium_program: Program<'info, Arcium>,
 }
 
-#[callback_accounts("aggregate_gradient")]
+#[callback_accounts("remove_dataset")]
 #[derive(Accounts)]
-pub struct AggregateGradientCallback<'info> {
+pub struct RemoveDatasetCallback<'info> {
     pub arcium_program: Program<'info, Arcium>,
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_AGGREGATE))]
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_REMOVE))]
     pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
     #[account(address = derive_mxe_pda!())] pub mxe_account: Account<'info, MXEAccount>,
     /// CHECK: arcium.
@@ -633,11 +821,13 @@ pub struct AggregateGradientCallback<'info> {
     #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
     /// CHECK: sysvar.
     pub instructions_sysvar: UncheckedAccount<'info>,
+    #[account(mut, seeds = [b"registry"], bump)]
+    pub registry_state: Box<Account<'info, RegistryState>>,
 }
 
-#[init_computation_definition_accounts("aggregate_gradient", payer)]
+#[init_computation_definition_accounts("init_registry", payer)]
 #[derive(Accounts)]
-pub struct InitAggregateCompDef<'info> {
+pub struct InitInitRegistryCompDef<'info> {
     #[account(mut)] pub payer: Signer<'info>,
     #[account(mut, address = derive_mxe_pda!())]
     pub mxe_account: Box<Account<'info, MXEAccount>>,
@@ -782,14 +972,18 @@ pub struct CheckThresholdCallback<'info> {
     pub instructions_sysvar: UncheckedAccount<'info>,
 }
 
-#[event] pub struct DatasetRegisteredEvent  { pub result: [u8; 32], pub nonce: [u8; 16] }
-#[event] pub struct DatasetMatchedEvent     { pub compatible: [u8; 32], pub score: [u8; 32], pub nonce: [u8; 16] }
+#[event] pub struct DatasetRegisteredEvent { pub placed_index: u64, pub nonce: [u8; 16] }
+#[event] pub struct DatasetSearchEvent { pub best_score: [u8; 32], pub found: [u8; 32], pub nonce: [u8; 16], pub best_idx: u64 }
 #[event] pub struct GradientAggregatedEvent { pub result: [u8; 32], pub nonce: [u8; 16] }
 #[event] pub struct ReputationUpdatedEvent { pub completed_trades: [u8; 32], pub disputes_lost: [u8; 32], pub score: [u8; 32], pub nonce: [u8; 16] }
 #[event] pub struct ThresholdCheckedEvent  { pub passes: [u8; 32], pub nonce: [u8; 16] }
 
 #[error_code]
 pub enum ErrorCode {
+    #[msg("Dataset-index buiten bereik.")]
+    InvalidDatasetIndex,
+    #[msg("Deze dataset is niet van jou.")]
+    NotDatasetOwner,
     #[msg("The computation was aborted")]
     AbortedComputation,
     #[msg("Escrow amount must be greater than zero")]
