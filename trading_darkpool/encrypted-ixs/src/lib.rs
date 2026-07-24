@@ -8,11 +8,12 @@ mod circuits {
 
     #[derive(Clone, Copy)]
     pub struct Order {
-        pub asset_id: u64,
-        pub bid:      u64,
-        pub size:     u64,
-        pub is_buy:   bool,
-        pub active:   bool,
+        pub asset_id:   u64,
+        pub bid:        u64,
+        pub size:       u64,
+        pub is_buy:     bool,
+        pub active:     bool,
+        pub expires_at: u64,  // Unix timestamp, 0 = nooit
     }
 
     pub struct OrderBook {
@@ -21,10 +22,11 @@ mod circuits {
     }
 
     pub struct NewOrder {
-        pub asset_id: u64,
-        pub bid:      u64,
-        pub size:     u64,
-        pub is_buy:   bool,
+        pub asset_id:   u64,
+        pub bid:        u64,
+        pub size:       u64,
+        pub is_buy:     bool,
+        pub expires_at: u64,  // Unix timestamp, 0 = nooit
     }
 
     pub struct MatchResult {
@@ -46,8 +48,9 @@ mod circuits {
             asset_id: 0,
             bid:      0,
             size:     0,
-            is_buy:   false,
-            active:   false,
+            is_buy:     false,
+            active:     false,
+            expires_at: 0,
         };
         let book = OrderBook {
             orders: [empty_order; ORDER_BOOK_SIZE],
@@ -71,8 +74,9 @@ mod circuits {
                 book.orders[i].asset_id = new_order.asset_id;
                 book.orders[i].bid      = new_order.bid;
                 book.orders[i].size     = new_order.size;
-                book.orders[i].is_buy   = new_order.is_buy;
-                book.orders[i].active   = true;
+                book.orders[i].is_buy     = new_order.is_buy;
+                book.orders[i].active     = true;
+                book.orders[i].expires_at = new_order.expires_at;
                 book.count += 1;
                 placed = true;
                 placed_index = i as u64;
@@ -84,8 +88,9 @@ mod circuits {
 
     #[instruction]
     pub fn match_orders(
-        book_ctxt:  Enc<Mxe, OrderBook>,
-        asset_ctxt: Enc<Shared, u64>,
+        book_ctxt:    Enc<Mxe, OrderBook>,
+        asset_ctxt:   Enc<Shared, u64>,
+        current_time: u64,
     ) -> (Enc<Shared, MatchResult>, u64, u64) {
         let book         = book_ctxt.to_arcis();
         let target_asset = asset_ctxt.to_arcis();
@@ -101,7 +106,8 @@ mod circuits {
         let mut sell_idx:  u64 = ORDER_BOOK_SIZE as u64;
 
         for i in 0..ORDER_BOOK_SIZE {
-            if book.orders[i].active && book.orders[i].asset_id == target_asset {
+            let expired = book.orders[i].expires_at > 0 && book.orders[i].expires_at < current_time;
+            if book.orders[i].active && !expired && book.orders[i].asset_id == target_asset {
                 if book.orders[i].is_buy {
                     if !has_buy || book.orders[i].bid > buy_bid {
                         has_buy  = true;

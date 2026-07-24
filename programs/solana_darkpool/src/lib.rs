@@ -112,10 +112,11 @@ pub mod solana_darkpool {
     pub fn place_order(
         ctx: Context<PlaceOrder>,
         computation_offset: u64,
-        enc_asset_id: [u8; 32],
-        enc_bid:      [u8; 32],
-        enc_size:     [u8; 32],
-        enc_is_buy:   [u8; 32],
+        enc_asset_id:   [u8; 32],
+        enc_bid:        [u8; 32],
+        enc_size:       [u8; 32],
+        enc_is_buy:     [u8; 32],
+        enc_expires_at: [u8; 32],
         pubkey: [u8; 32],
         nonce:  u128,
     ) -> Result<()> {
@@ -129,6 +130,7 @@ pub mod solana_darkpool {
             .encrypted_u64(enc_bid)
             .encrypted_u64(enc_size)
             .encrypted_u64(enc_is_buy)
+            .encrypted_u64(enc_expires_at)
             .build();
         let callback_ix = CallbackInstruction {
             program_id: ID_CONST,
@@ -177,6 +179,7 @@ pub mod solana_darkpool {
         ctx: Context<MatchOrders>,
         computation_offset: u64,
         enc_asset_id: [u8; 32],
+        current_time: u64,
         pubkey: [u8; 32],
         nonce:  u128,
     ) -> Result<()> {
@@ -187,6 +190,7 @@ pub mod solana_darkpool {
             .x25519_pubkey(pubkey)
             .plaintext_u128(nonce)
             .encrypted_u64(enc_asset_id)
+            .plaintext_u64(current_time)
             .build();
         queue_computation(
             ctx.accounts, computation_offset, args,
@@ -1138,7 +1142,7 @@ pub struct CheckThresholdCallback<'info> {
     pub instructions_sysvar: UncheckedAccount<'info>,
 }
 
-pub const ORDER_BOOK_CT_LEN: usize = 5001; // 1000 orders x 5 ciphertext-elementen/order (empirisch herbevestigd na herontwerp: owner niet meer versleuteld) + 1 voor count
+pub const ORDER_BOOK_CT_LEN: usize = 6001; // 1000 orders x 6 ciphertext-elementen/order (asset_id/bid/size/is_buy/active/expires_at) (empirisch herbevestigd na herontwerp: owner niet meer versleuteld) + 1 voor count
 pub const ORDER_BOOK_MAX_ORDERS: usize = 1000;
 
 #[account]
